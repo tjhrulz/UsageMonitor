@@ -64,13 +64,16 @@ namespace ProcessMonitor
     //Custom counter that implements IComparable so that it can be easily sorted
     public class Counter : IComparable<Counter>
     {
-        public string Name;
-        public long Value;
 
-        public Counter(string Name, long Value)
+        public string Name;
+        public float Value;
+        public CounterSample Sample;
+
+        public Counter(string Name, float Value, CounterSample Sample)
         {
             this.Name = Name;
             this.Value = Value;
+            this.Sample = Sample;
         }
 
         public int CompareTo(Counter that)
@@ -83,115 +86,208 @@ namespace ProcessMonitor
 
     //Counters is basically a glorified dictionary that contains all the info and threads for updating each counter
     //Each counter is exposed in a ReadOnly fashion and is locked from reading during the write (Which is very short since temps are used)
-    //Counters aggragate what skins are also using it and are only allocated and updated when a measure is still using them
-    //@TODO store skins that whitelist and blacklist a process here?
+    //Counters aggragate what measures are also using it and are only allocated and updated when a measure is still using them
+    //@TODO store measures that whitelist and blacklist a process here?
     public static class Counters
     {
+
         public class CounterLists
         {
             //Both a list sorted by usage and a dictionary are able to be used to access the processes 
             public Dictionary<string, Counter> ByName;
             public List<Counter> ByUsage;
 
-            //This is a list of all the skins using the same counters and what each ones update rate is (The lowest rate is the one used
-            private Dictionary<IntPtr, int> Skinptrs;
-            //This is the thread that will update its update rate dynamically to the lowest update rate a skin has set
+            //This is a list of all the measures using the same counters and what each ones update rate is (The lowest rate is the one used
+            private Dictionary<String, int> IDs;
+            //This is the thread that will update its update rate dynamically to the lowest update rate a measure has set
             private Timer UpdateTimer;
-
-            public CounterLists(string catagory, string subCatagory, IntPtr skinptr, bool isPID, int updateInMS)
+            private int UpdateTimerRate;
+            //Function used to update counters
+            private void UpdateCounter(string catagory, string subCatagory, bool isPID)
             {
-                this.ByName = new Dictionary<string, Counter>();
-                this.ByUsage = new List<Counter>();
-                this.Skinptrs = new Dictionary<IntPtr, int>();
-                this.Skinptrs.Add(skinptr, updateInMS);
-
-                //@TODO This is still pretty slow, maybe going event based would be better
-                pidUpdateTimer = new Timer((stateInfo) =>
+                var temp = new PerformanceCounterCategory(catagory).ReadCategory()[subCatagory];
+                Dictionary<string, Counter> tempByName = new Dictionary<string, Counter>(temp.Count);
+                List<Counter> tempByUsage = new List<Counter>(temp.Count);
+                foreach (InstanceData instance in temp.Values)
                 {
+                    Counter counter = new Counter(instance.InstanceName, instance.RawValue, instance.Sample);
+                    //Counter name is a PID and needs to be converted to a process name
                     if (isPID)
                     {
-                        var pidCounter = new PerformanceCounterCategory("Process").ReadCategory()["ID Process"];
-                        pids = new Dictionary<int, string>(pidCounter.Count);
+                        //"pid_12952_luid_0x00000000_0x00009AC6_phys_0_eng_0_engtype_3D"
+                        //"pid_11528_luid_0x00000000_0x0000A48E_phys_0"
+                        //This could be more hard coded but I wanted to be more versitile;
+                        int start = counter.Name.IndexOf("pid_") + "pid_".Length;
+                        int end = counter.Name.IndexOf("_", start);
 
-                        foreach (InstanceData pid in pidCounter.Values)
+                        if (Int32.TryParse(counter.Name.Substring(start, end - start), out int myPid))
                         {
                             try
                             {
-                                //Both Idle and _Total share a PID, ignore them
-                                if (pid.RawValue != 0)
+                                //PIDs will not be interpreted if there is no info to go on and will be left as is
+                                if (pids.Count > 0)
                                 {
-                                    pids.Add((int)pid.RawValue, pid.InstanceName);
+                                    counter.Name = pids[myPid];
                                 }
                             }
                             catch
                             {
-                                //PIDs should be unique but if they somehow are not throw an error
-                                API.Log((int)API.LogType.Error, "Found another process with the pid of" + pid);
+                                API.Log((int)API.LogType.Debug, "Could not find a process with PID of " + myPid);
                             }
                         }
                     }
-                }, null, 0, updateInMS);
 
-                this.UpdateTimer = new Timer((stateInfo) =>
-                {
-                    //@TODO Use temp for calculations and lock while writing
-                    var temp = new PerformanceCounterCategory(catagory).ReadCategory()[subCatagory];
-                    this.ByName = new Dictionary<string, Counter>(temp.Count);
-                    this.ByUsage = new List<Counter>(temp.Count);
-                    foreach (InstanceData instance in temp.Values)
+                    if (this.ByName.ContainsKey(counter.Name))
                     {
-                        Counter counter = new Counter(instance.InstanceName, instance.RawValue);
-                        //Counter name is a PID and needs to be converted to a process name
-                        if(isPID)
+                        //Check if last update had a raw value, if it did not data will be faulty
+                        if (this.ByName[counter.Name].Sample.RawValue != 0)
                         {
-                            //"pid_12952_luid_0x00000000_0x00009AC6_phys_0_eng_0_engtype_3D"
-                            //"pid_11528_luid_0x00000000_0x0000A48E_phys_0"
-                            //This could be more hard coded but I wanted to be more versitile;
-                            int start = counter.Name.IndexOf("pid_") + "pid_".Length;
-                            int end = counter.Name.IndexOf("_", start);
+                            counter = new Counter(counter.Name, CounterSample.Calculate(this.ByName[counter.Name].Sample, counter.Sample), counter.Sample);
+                        }
+                        else
+                        {
+                            counter = new Counter(counter.Name, 0, counter.Sample);
+                        }
+                    }
 
-                            if(Int32.TryParse(counter.Name.Substring(start, end - start), out int myPid))
+                    if (tempByName.ContainsKey(counter.Name))
+                    {
+                        tempByName[counter.Name].Value += counter.Value;
+                    }
+                    else
+                    {
+                        tempByName.Add(counter.Name, counter);
+                    }
+                }
+                //@TODO check performance of this
+                tempByUsage = tempByName.Values.ToList();
+                tempByUsage.Sort();
+
+                this.ByName = tempByName;
+                this.ByUsage = tempByUsage;
+            }
+
+            public CounterLists(string catagory, string subCatagory, String ID, bool isPID, int updateInMS)
+            {
+                this.ByName = new Dictionary<string, Counter>();
+                this.ByUsage = new List<Counter>();
+                this.IDs = new Dictionary<String, int>();
+                this.IDs.Add(ID, updateInMS);
+
+                if (isPID)
+                {
+                    pidIDs.Add(ID, updateInMS);
+                    //@TODO This is still pretty slow, maybe going event based would be better
+
+                    if (pidUpdateTimer == null || pidUpdateTimerRate > updateInMS)
+                    {
+                        pidUpdateTimerRate = updateInMS;
+                        pidUpdateTimer = new Timer((stateInfo) =>
+                        {
+                            var pidCounter = new PerformanceCounterCategory("Process").ReadCategory()["ID Process"];
+                            pids = new Dictionary<int, string>(pidCounter.Count);
+
+                            foreach (InstanceData pid in pidCounter.Values)
                             {
                                 try
                                 {
-                                    //PIDs will not be interpreted if there is no info to go on and will be left as is
-                                    if (pids.Count > 0)
+                                //Both Idle and _Total share a PID, ignore them
+                                if (pid.RawValue != 0)
                                     {
-                                        counter.Name = pids[myPid];
+                                        pids.Add((int)pid.RawValue, pid.InstanceName);
                                     }
                                 }
                                 catch
                                 {
-                                    API.Log((int)API.LogType.Error, "Could not find a process with PID of " + myPid);
+                                    //PIDs should be unique but if they somehow are not throw an error
+                                    API.Log((int)API.LogType.Debug, "Found another process with the pid of" + pid);
                                 }
                             }
-                        }
-                        if(this.ByName.ContainsKey(counter.Name))
-                        {
-                            this.ByName[counter.Name].Value += counter.Value;
-                        }
-                        else
-                        {
-                            this.ByName.Add(counter.Name, counter);
-                        }
+                        }, null, 0, updateInMS);
                     }
-                    //@TODO check performance of this
-                    this.ByUsage = this.ByName.Values.ToList();
-                    this.ByUsage.Sort();
-                }, null, 0, updateInMS);
+                }
+
+                this.UpdateTimer = new Timer((stateInfo) => UpdateCounter(catagory, subCatagory, isPID), null, 0, updateInMS);
+                this.UpdateTimerRate = updateInMS;
             }
 
-            public void AddSkin(IntPtr skinptr, int updateInMS)
+            //Add new ID to instance and check update timer needs to be decrease (Will also update rate if an instance already existed)
+            public void AddInstance(string catagory, string subCatagory, String ID, bool isPID, int updateInMS)
             {
-                //@TODO Implement, need to check if update rate changes during add
-                //@TODO check if isPID and if it is then see if that update rate needs to be changed
-                return;
+                if (!this.IDs.ContainsKey(ID))
+                {
+                    this.IDs.Add(ID, updateInMS);
+                    if (this.UpdateTimerRate > updateInMS)
+                    {
+                        this.UpdateTimer.Change(0, updateInMS);
+                    }
+                }
+                else if(this.IDs[ID] != updateInMS)
+                {
+                    this.IDs[ID] = updateInMS;
+                    if (this.UpdateTimerRate > updateInMS)
+                    {
+                        if (this.UpdateTimer != null)
+                        {
+                            this.UpdateTimer.Change(0, updateInMS);
+                        }
+                        //Somehow timer got deintialized and we ended up here without it being reinitialized
+                        else
+                        {
+                            this.UpdateTimer = new Timer((stateInfo) => UpdateCounter(catagory, subCatagory, isPID), null, 0, updateInMS);
+                        }
+                    }
+                }
             }
-            public void RemoveSkin(IntPtr skinptr)
+            public void RemoveInstance(String ID)
             {
-                //@TODO Implement, need to check if update rate changes during remove and nulled out if no remaining skins use it
-                //@TODO Check if last skin with isPID and if so stop thread
-                return;
+                if(this.IDs.ContainsKey(ID) && this.IDs[ID] == this.UpdateTimerRate)
+                {
+                    if (pidIDs.ContainsKey(ID))
+                    {
+                        if(pidIDs.Count == 1)
+                        {
+                            pidUpdateTimer.Dispose();
+                            pidUpdateTimer = null;
+                            pidUpdateTimerRate = int.MaxValue;
+                        }
+                        pidIDs.Remove(ID);
+                    }
+                    //There is more than one ID using this, find the new update rate
+                    if (this.IDs.Count > 1)
+                    {
+                        int min = int.MaxValue;
+
+                        //Find smallest update time in list (Should be near O(1) in real world since no one should be changing this)
+                        foreach (int interval in this.IDs.Values)
+                        {
+                            if (interval < min)
+                            {
+                                min = interval;
+                            }
+                            if (min == UpdateTimerRate)
+                            {
+                                break;
+                            }
+                        }
+
+                        this.UpdateTimerRate = min;
+                        this.UpdateTimer.Change(0, min);
+                    }
+                    //Only one timer just remove it and disable thread
+                    else
+                    {
+                        this.UpdateTimer.Dispose();
+                        this.UpdateTimer = null;
+                        this.UpdateTimerRate = int.MaxValue;
+                    }
+                }
+                this.IDs.Remove(ID);
+            }
+
+            public int Count()
+            {
+                return this.IDs.Count();
             }
         }
 
@@ -201,32 +297,41 @@ namespace ProcessMonitor
 
         //This is a list of all the PIDs and their associated process name, used to decode pids to process names
         private static Dictionary<int, string> pids = new Dictionary<int, string>();
-        //Used to update pids, is set whenever a skin needs it to the update rate of that skin
+        //Used to update pids, is set to lowest update rate of a counter that needs it
         private static Timer pidUpdateTimer;
+        private static int pidUpdateTimerRate = int.MaxValue;
+        //List of all measures 
+        private static Dictionary<String, int> pidIDs = new Dictionary<String, int>();
 
 
         //Adds a new counter
-        public static void AddCounter(string catagory, string subCatagory, IntPtr skinptr, bool isPID = false, int updateInMS = 1000)
+        public static void AddCounter(string catagory, string subCatagory, String ID, bool isPID = false, int updateInMS = 1000)
         {
-            //If it already exists just add the skinptr and update rate to the list
+            //If it already exists just add the ID and update rate to the list
             if (counters.TryGetValue(catagory + '|' + subCatagory, out CounterLists counter))
             {
-                counter.AddSkin(skinptr, updateInMS);
+                counter.AddInstance(catagory, subCatagory, ID, isPID, updateInMS);
             }
             //If counter does not yet exist it will need to be created
             else
             {
-                CounterLists newCounter = new CounterLists(catagory, subCatagory, skinptr, isPID, updateInMS);
+                CounterLists newCounter = new CounterLists(catagory, subCatagory, ID, isPID, updateInMS);
                 counters.Add(catagory + '|' + subCatagory, newCounter);
             }
 
         }
-        public static void RemoveCounter(string catagory, string subCatagory, IntPtr skinptr)
+        public static void RemoveCounter(string catagory, string subCatagory, String ID)
         {
-            //If counter exists remove skinptr from it (Which will remove counter if it is the last skin
-            if(counters.TryGetValue(catagory + '|' + subCatagory, out CounterLists counter))
+            //If counter exists remove ID from it
+            if (counters.TryGetValue(catagory + '|' + subCatagory, out CounterLists counter))
             {
-                counter.RemoveSkin(skinptr);
+                counter.RemoveInstance(ID);
+                //If nothing is referencing that counter anymore remove and deallocate it
+                if (counter.Count() == 0)
+                {
+                    counter = null;
+                    counters.Remove(catagory + '|' + subCatagory);
+                }
             }
         }
         public static CounterLists GetCounter(string catagory, string subCatagory)
@@ -262,6 +367,8 @@ namespace ProcessMonitor
         {
             Measure measure = (Measure)data;
 
+            Counters.RemoveCounter(measure.myCatagories.Catagory, measure.myCatagories.SubCatagory, measure.API.GetSkin() + measure.API.GetMeasureName());
+
             GCHandle.FromIntPtr(data).Free();
         }
 
@@ -292,7 +399,7 @@ namespace ProcessMonitor
             measure.myInstance = measure.API.ReadInt("Instance", -1);
             measure.myName = measure.API.ReadString("Name", null);
 
-            Counters.AddCounter(measure.myCatagories.Catagory, measure.myCatagories.SubCatagory, measure.API.GetSkin(),isPID);
+            Counters.AddCounter(measure.myCatagories.Catagory, measure.myCatagories.SubCatagory, measure.API.GetSkin()+measure.API.GetMeasureName(),isPID);
         }
 
         [DllExport]
@@ -300,6 +407,7 @@ namespace ProcessMonitor
         {
             Measure measure = (Measure)data;
             
+            //@TODO use function for this instead of direct access
             if (Counters.counters.TryGetValue(measure.myCatagories.Catagory + "|" + measure.myCatagories.SubCatagory, out Counters.CounterLists counters))
             {
                 if (counters.ByUsage.Count > measure.myInstance && measure.myInstance >= 0)
@@ -332,7 +440,7 @@ namespace ProcessMonitor
                 {
                     return Marshal.StringToHGlobalUni(counters.ByUsage[measure.myInstance].Name);
                 }
-                else
+                else if (counters.ByName.Count > 0 && measure.myName.Length > 0)
                 {
                     if (counters.ByName.TryGetValue(measure.myName, out Counter counter))
                     {

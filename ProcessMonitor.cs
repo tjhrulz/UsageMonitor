@@ -14,8 +14,6 @@ namespace ProcessMonitor
     //Default measure types have all info from Perfmance Monitor preconfigured for ease of use
     //@TODO Find a way to implement NETDOWN and NETUP
     //@TODO Add variants to some of theses
-    //@TODO Add support for custom types
-    //@TODO Have these use actual strings when set 
     public enum MeasureType
     {
         CPU,
@@ -24,40 +22,49 @@ namespace ProcessMonitor
         GPU,
         VRAM,
         NETDOWN,
-        NETUP
+        NETUP,
+        CUSTOM
     }
-    public class MeasureCatagory
+    public class MeasureCategory
     {
-        public string Catagory;
-        public string SubCatagory;
+        public string Category { get; }
+        public string SubCategory { get; }
+        public MeasureType Type { get; }
 
-        public MeasureCatagory(MeasureType type)
+        public MeasureCategory(MeasureType type)
         {
-            if(type == MeasureType.CPU)
+            this.Type = type;
+            if (type == MeasureType.CPU)
             {
-                Catagory = "Process";
-                SubCatagory = "% Processor Time";
+                Category = "Process";
+                SubCategory = "% Processor Time";
             }
             else if (type == MeasureType.RAM)
             {
-                Catagory = "Process";
-                SubCatagory = "Working Set";
+                Category = "Process";
+                SubCategory = "Working Set";
             }
             else if (type == MeasureType.IO)
             {
-                Catagory = "Process";
-                SubCatagory = "IO Data Bytes/sec";
+                Category = "Process";
+                SubCategory = "IO Data Bytes/sec";
             }
             else if (type == MeasureType.GPU)
             {
-                Catagory = "GPU Engine";
-                SubCatagory = "Utilization Percentage";
+                Category = "GPU Engine";
+                SubCategory = "Utilization Percentage";
             }
             else if (type == MeasureType.VRAM)
             {
-                Catagory = "GPU Process Memory";
-                SubCatagory = "Dedicated Usage";
+                Category = "GPU Process Memory";
+                SubCategory = "Dedicated Usage";
             }
+        }
+        public MeasureCategory(string category, string subCategory)
+        {
+            this.Category = category;
+            this.SubCategory = subCategory;
+            this.Type = MeasureType.CUSTOM;
         }
     }
 
@@ -87,7 +94,6 @@ namespace ProcessMonitor
     //Counters is basically a glorified dictionary that contains all the info and threads for updating each counter
     //Each counter is exposed in a ReadOnly fashion and is locked from reading during the write (Which is very short since temps are used)
     //Counters aggragate what measures are also using it and are only allocated and updated when a measure is still using them
-    //@TODO store measures that whitelist and blacklist a process here?
     public static class Counters
     {
 
@@ -104,13 +110,13 @@ namespace ProcessMonitor
             private int UpdateTimerRate;
             private Object UpdateTimerLock = new Object();
             //Function used to update counters
-            private void UpdateCounters(string catagory, string subCatagory, bool isPID)
+            private void UpdateCounters(string category, string subCategory, bool isPID)
             {
                 if (Monitor.TryEnter(UpdateTimerLock))
                 {
                     try
                     {
-                        var temp = new PerformanceCounterCategory(catagory).ReadCategory()[subCatagory];
+                        var temp = new PerformanceCounterCategory(category).ReadCategory()[subCategory];
                         Dictionary<string, Counter> tempByName = new Dictionary<string, Counter>(temp.Count);
                         List<Counter> tempByUsage = new List<Counter>(temp.Count);
                         foreach (InstanceData instance in temp.Values)
@@ -173,7 +179,6 @@ namespace ProcessMonitor
                                 tempByName.Add(counter.Name, counter);
                             }
                         }
-                        //@TODO check performance of this
                         tempByUsage = tempByName.Values.ToList();
                         tempByUsage.Sort();
 
@@ -187,7 +192,7 @@ namespace ProcessMonitor
                 }
             }
 
-            public CounterLists(string catagory, string subCatagory, String ID, bool isPID, int updateInMS)
+            public CounterLists(string category, string subCategory, String ID, bool isPID, int updateInMS)
             {
                 this.ByName = new Dictionary<string, Counter>();
                 this.ByUsage = new List<Counter>();
@@ -199,7 +204,7 @@ namespace ProcessMonitor
                 if (isPID)
                 {
                     pidIDs.Add(ID, updateInMS);
-                    //@TODO This is still pretty slow, maybe going event based would be better
+                    //@TODO This is still kinda slow, maybe going event based would be better
 
                     if (pidUpdateTimer == null || pidUpdateTimerRate > updateInMS)
                     {
@@ -208,12 +213,12 @@ namespace ProcessMonitor
                     }
                 }
 
-                this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(catagory, subCatagory, isPID), null, 0, updateInMS);
+                this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(category, subCategory, isPID), null, 0, updateInMS);
                 this.UpdateTimerRate = updateInMS;
             }
 
             //Add new ID to instance and check update timer needs to be decrease (Will also update rate if an instance already existed)
-            public void AddInstance(string catagory, string subCatagory, String ID, bool isPID, int updateInMS)
+            public void AddInstance(string category, string subCategory, String ID, bool isPID, int updateInMS)
             {
                 if (!this.IDs.ContainsKey(ID))
                 {
@@ -235,7 +240,7 @@ namespace ProcessMonitor
                         //Somehow timer got deintialized and we ended up here without it being reinitialized
                         else
                         {
-                            this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(catagory, subCatagory, isPID), null, 0, updateInMS);
+                            this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(category, subCategory, isPID), null, 0, updateInMS);
                         }
                     }
                 }
@@ -318,7 +323,7 @@ namespace ProcessMonitor
                             //Both Idle and _Total share a PID, ignore them
                             if (pid.RawValue != 0)
                             {
-                                pids.Add((int)pid.RawValue, pid.InstanceName);
+                                temp.Add((int)pid.RawValue, pid.InstanceName);
                             }
                         }
                         catch
@@ -340,38 +345,38 @@ namespace ProcessMonitor
 
 
         //Adds a new counter
-        public static void AddCounter(string catagory, string subCatagory, String ID, bool isPID = false, int updateInMS = 1000)
+        public static void AddCounter(string category, string subCategory, String ID, bool isPID = false, int updateInMS = 1000)
         {
             //If it already exists just add the ID and update rate to the list
-            if (counters.TryGetValue(catagory + '|' + subCatagory, out CounterLists counter))
+            if (counters.TryGetValue(category + '|' + subCategory, out CounterLists counter))
             {
-                counter.AddInstance(catagory, subCatagory, ID, isPID, updateInMS);
+                counter.AddInstance(category, subCategory, ID, isPID, updateInMS);
             }
             //If counter does not yet exist it will need to be created
             else
             {
-                CounterLists newCounter = new CounterLists(catagory, subCatagory, ID, isPID, updateInMS);
-                counters.Add(catagory + '|' + subCatagory, newCounter);
+                CounterLists newCounter = new CounterLists(category, subCategory, ID, isPID, updateInMS);
+                counters.Add(category + '|' + subCategory, newCounter);
             }
 
         }
-        public static void RemoveCounter(string catagory, string subCatagory, String ID)
+        public static void RemoveCounter(string category, string subCategory, String ID)
         {
             //If counter exists remove ID from it
-            if (counters.TryGetValue(catagory + '|' + subCatagory, out CounterLists counter))
+            if (counters.TryGetValue(category + '|' + subCategory, out CounterLists counter))
             {
                 counter.RemoveInstance(ID);
                 //If nothing is referencing that counter anymore remove and deallocate it
                 if (counter.Count() == 0)
                 {
                     counter = null;
-                    counters.Remove(catagory + '|' + subCatagory);
+                    counters.Remove(category + '|' + subCategory);
                 }
             }
         }
-        public static bool GetCounterLists(string catagory, string subCatagory, out CounterLists counterLists)
+        public static bool GetCounterLists(string category, string subCategory, out CounterLists counterLists)
         {
-            return Counters.counters.TryGetValue(catagory + "|" + subCatagory, out counterLists);
+            return Counters.counters.TryGetValue(category + "|" + subCategory, out counterLists);
         }
     }
 
@@ -383,7 +388,7 @@ namespace ProcessMonitor
         }
         public Rainmeter.API API;
 
-        public MeasureCatagory myCatagories;
+        public MeasureCategory myCatagories;
         public int myInstance;
         public string myName;
     }
@@ -402,7 +407,7 @@ namespace ProcessMonitor
         {
             Measure measure = (Measure)data;
 
-            Counters.RemoveCounter(measure.myCatagories.Catagory, measure.myCatagories.SubCatagory, measure.API.GetSkin() + measure.API.GetMeasureName());
+            Counters.RemoveCounter(measure.myCatagories.Category, measure.myCatagories.SubCategory, measure.API.GetSkin() + measure.API.GetMeasureName());
 
             GCHandle.FromIntPtr(data).Free();
         }
@@ -417,24 +422,37 @@ namespace ProcessMonitor
 
             try
             {
-                //@TODO check if type is custom and if it is then run custom setup
                 MeasureType type = (MeasureType)Enum.Parse(typeof(MeasureType), measure.API.ReadString("Type", "CPU"), true);
-                measure.myCatagories = new MeasureCatagory(type);
-                if(type == MeasureType.GPU || type == MeasureType.VRAM)
+
+                //Check if type is custom if it is not just set category, if it is then read custom options
+                if (type != MeasureType.CUSTOM)
                 {
-                    isPID = true;
+                    measure.myCatagories = new MeasureCategory(type);
+
+                    if (type == MeasureType.GPU || type == MeasureType.VRAM)
+                    {
+                        isPID = true;
+                    }
+                }
+                else
+                {
+                    measure.myCatagories = new MeasureCategory(
+                        measure.API.ReadString("Category", "Process"), 
+                        measure.API.ReadString("SubCategory", "% Processor Time"));
+
+                    isPID = measure.API.ReadInt("DecodePIDs", 0) != 0 ? true : false; 
                 }
             }
             catch
             {
-                measure.API.Log(API.LogType.Error, "Type " + measure.API.ReadString("Type", "CPU") + " was not in the list of predefined catagories, assuming CPU");
-                measure.myCatagories = new MeasureCatagory(MeasureType.CPU);
+                measure.API.Log(API.LogType.Error, "Type=" + measure.API.ReadString("Type", "CPU") + " was not in the list of predefined catagories, assuming CPU");
+                measure.myCatagories = new MeasureCategory(MeasureType.CPU);
             }
+
+            Counters.AddCounter(measure.myCatagories.Category, measure.myCatagories.SubCategory, measure.API.GetSkin()+measure.API.GetMeasureName(),isPID);
 
             measure.myInstance = measure.API.ReadInt("Instance", -1);
             measure.myName = measure.API.ReadString("Name", null);
-
-            Counters.AddCounter(measure.myCatagories.Catagory, measure.myCatagories.SubCatagory, measure.API.GetSkin()+measure.API.GetMeasureName(),isPID);
         }
 
         [DllExport]
@@ -443,7 +461,7 @@ namespace ProcessMonitor
             Measure measure = (Measure)data;
             
             //@TODO use function for this instead of direct access
-            if (Counters.GetCounterLists(measure.myCatagories.Catagory, measure.myCatagories.SubCatagory, out Counters.CounterLists counters))
+            if (Counters.GetCounterLists(measure.myCatagories.Category, measure.myCatagories.SubCategory, out Counters.CounterLists counters))
             {
                 if (counters.ByUsage.Count > measure.myInstance && measure.myInstance >= 0)
                 {
@@ -469,7 +487,7 @@ namespace ProcessMonitor
         {
             Measure measure = (Measure)data;
 
-            if (Counters.GetCounterLists(measure.myCatagories.Catagory, measure.myCatagories.SubCatagory, out Counters.CounterLists counters))
+            if (Counters.GetCounterLists(measure.myCatagories.Category, measure.myCatagories.SubCategory, out Counters.CounterLists counters))
             {
                 if (counters.ByUsage.Count > measure.myInstance && measure.myInstance >= 0)
                 {

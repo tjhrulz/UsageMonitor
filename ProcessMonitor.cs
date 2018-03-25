@@ -27,8 +27,8 @@ namespace ProcessMonitor
     }
     public class MeasureCategory
     {
-        public string Category { get; }
-        public string SubCategory { get; }
+        public String Category { get; }
+        public String SubCategory { get; }
         public MeasureType Type { get; }
 
         public MeasureCategory(MeasureType type)
@@ -60,7 +60,7 @@ namespace ProcessMonitor
                 SubCategory = "Dedicated Usage";
             }
         }
-        public MeasureCategory(string category, string subCategory)
+        public MeasureCategory(String category, String subCategory)
         {
             this.Category = category;
             this.SubCategory = subCategory;
@@ -72,11 +72,11 @@ namespace ProcessMonitor
     public class Counter : IComparable<Counter>
     {
 
-        public string Name;
+        public String Name;
         public float Value;
         public CounterSample Sample;
 
-        public Counter(string Name, float Value, CounterSample Sample)
+        public Counter(String Name, float Value, CounterSample Sample)
         {
             this.Name = Name;
             this.Value = Value;
@@ -96,94 +96,140 @@ namespace ProcessMonitor
     //Counters aggragate what measures are also using it and are only allocated and updated when a measure is still using them
     public static class Counters
     {
-
         public class CounterLists
         {
             //Both a list sorted by usage and a dictionary are able to be used to access the processes 
-            public Dictionary<string, Counter> ByName;
-            public List<Counter> ByUsage;
+            public Dictionary<String, Dictionary<String, Counter>> ByName;
+            public Dictionary<String, List<Counter>> ByUsage;
+            public Dictionary<string, double> _Sum;
 
-            //This is a list of all the measures using the same counters and what each ones update rate is (The lowest rate is the one used
-            private Dictionary<String, int> IDs;
+            //This is a list of all the measures using the same category and what each ones update rate is (The lowest rate is the one used
+            private Dictionary<String, int> updateRates;
+            //This is a list of subcategories for this measure
+            private Dictionary<String, String> subCategories;
             //This is the thread that will update its update rate dynamically to the lowest update rate a measure has set
             private Timer UpdateTimer;
             private int UpdateTimerRate;
             private Object UpdateTimerLock = new Object();
+
             //Function used to update counters
-            private void UpdateCounters(string category, string subCategory, bool isPID)
+            private void UpdateCounters(String category, Dictionary<String, String> subCategories, bool isPID)
             {
                 if (Monitor.TryEnter(UpdateTimerLock))
                 {
                     try
                     {
-                        var temp = new PerformanceCounterCategory(category).ReadCategory()[subCategory];
-                        Dictionary<string, Counter> tempByName = new Dictionary<string, Counter>(temp.Count);
-                        List<Counter> tempByUsage = new List<Counter>(temp.Count);
-                        foreach (InstanceData instance in temp.Values)
-                        {
-                            Counter counter = new Counter(instance.InstanceName, instance.RawValue, instance.Sample);
-                            //Counter name is a PID and needs to be converted to a process name
-                            if (isPID)
-                            {
-                                //"pid_12952_luid_0x00000000_0x00009AC6_phys_0_eng_0_engtype_3D"
-                                //"pid_11528_luid_0x00000000_0x0000A48E_phys_0"
-                                //This could be more hard coded but I wanted to be more versitile;
-                                int start = counter.Name.IndexOf("pid_") + "pid_".Length;
-                                int end = counter.Name.IndexOf("_", start);
+                        var currCategory = new PerformanceCounterCategory(category).ReadCategory();
+                        _Sum = new Dictionary<string, double>();
 
-                                if (Int32.TryParse(counter.Name.Substring(start, end - start), out int myPid))
+                        foreach (String subCategory in subCategories.Values)
+                        {
+                            var temp = currCategory[subCategory];
+
+                            //@TODO replace _Sum key check with the options check once options object is done
+                            if (temp != null && !_Sum.ContainsKey(subCategory))
+                            {
+                                Dictionary<String, Counter> tempByName = new Dictionary<String, Counter>(temp.Count);
+                                List<Counter> tempByUsage = new List<Counter>(temp.Count);
+                                _Sum.Add(subCategory, 0);
+
+                                foreach (InstanceData instance in temp.Values)
                                 {
-                                    try
+                                    Counter counter = new Counter(instance.InstanceName, instance.RawValue, instance.Sample);
+                                    //Counter name is a PID and needs to be converted to a process name
+                                    if (isPID)
                                     {
-                                        //PIDs will not be interpreted if there is no info to go on and will be left as is
-                                        if (pids.Count > 0)
+                                        //"pid_12952_luid_0x00000000_0x00009AC6_phys_0_eng_0_engtype_3D"
+                                        //"pid_11528_luid_0x00000000_0x0000A48E_phys_0"
+                                        //This could be more hard coded but I wanted to be more versitile;
+                                        int start = counter.Name.IndexOf("pid_") + "pid_".Length;
+                                        int end = counter.Name.IndexOf("_", start);
+
+                                        if (Int32.TryParse(counter.Name.Substring(start, end - start), out int myPid))
                                         {
-                                            counter.Name = pids[myPid];
+                                            try
+                                            {
+                                                //PIDs will not be interpreted if there is no info to go on and will be left as is
+                                                if (pids.Count > 0)
+                                                {
+                                                    counter.Name = pids[myPid];
+                                                }
+                                            }
+                                            catch
+                                            {
+                                                API.Log((int)API.LogType.Debug, "Could not find a process with PID of " + myPid + " this PID will be ignored till found");
+                                                continue;
+                                            }
                                         }
                                     }
-                                    catch
+
+                                    if (this.ByName.ContainsKey(subCategory) && this.ByName[subCategory].ContainsKey(counter.Name))
                                     {
-                                        API.Log((int)API.LogType.Debug, "Could not find a process with PID of " + myPid + " this PID will be ignored till found");
-                                        continue;
+                                        //If last update or this update did not have a raw value then assume it is still 0
+                                        if (this.ByName[subCategory][counter.Name].Sample.RawValue != 0 
+                                            && counter.Sample.RawValue != 0)
+                                        {
+                                            counter = new Counter(counter.Name, CounterSample.Calculate(this.ByName[subCategory][counter.Name].Sample, counter.Sample), counter.Sample);
+                                        }
+                                        else
+                                        {
+                                            counter = new Counter(counter.Name, 0, counter.Sample);
+                                        }
+                                    }
+                                    //@TODO decide if I want to have values possibly be wrong for one cycle or be 0 for one cycle
+                                    else
+                                    {
+                                        counter = new Counter(counter.Name, 0, counter.Sample);
+                                    }
+
+                                    //Check if we already have a counter with the same name, if we do combine the two
+                                    if (tempByName.ContainsKey(counter.Name))
+                                    {
+                                        //Yes this is a mess, this is mostly needed for GPU processes but will also be needed for process rollups
+                                        //What it is for is if two counters exist with the same name we need to merge the final value for rainmeter
+                                        //But we also need to merge the counter sample values as well so that way proper readable values can be translated next cycle
+                                        tempByName[counter.Name].Value += counter.Value;
+                                        tempByName[counter.Name].Sample = new CounterSample(tempByName[counter.Name].Sample.RawValue + counter.Sample.RawValue,
+                                            tempByName[counter.Name].Sample.BaseValue, tempByName[counter.Name].Sample.CounterFrequency,
+                                            tempByName[counter.Name].Sample.SystemFrequency, tempByName[counter.Name].Sample.TimeStamp,
+                                            tempByName[counter.Name].Sample.TimeStamp100nSec, tempByName[counter.Name].Sample.CounterType);
+                                    }
+                                    else
+                                    {
+                                        tempByName.Add(counter.Name, counter);
+                                    }
+
+                                    //Custom sum variable so that special ones can be summed up without interfering with total
+                                    if (counter.Name != "_Total")
+                                    {
+                                        _Sum[subCategory] += counter.Value;
                                     }
                                 }
-                            }
+                                tempByUsage = tempByName.Values.ToList();
+                                tempByUsage.Sort();
 
-                            if (this.ByName.ContainsKey(counter.Name))
-                            {
-                                //If last update or this update did not have a raw value then assume it is still 0
-                                if (this.ByName[counter.Name].Sample.RawValue != 0 && counter.Sample.RawValue != 0)
+                                if (this.ByName.ContainsKey(subCategory))
                                 {
-                                    counter = new Counter(counter.Name, CounterSample.Calculate(this.ByName[counter.Name].Sample, counter.Sample), counter.Sample);
+                                    this.ByName[subCategory] = tempByName;
                                 }
                                 else
                                 {
-                                    counter = new Counter(counter.Name, 0, counter.Sample);
+                                    this.ByName.Add(subCategory, tempByName);
                                 }
-                            }
-
-                            //Check if we already have a counter with the same name, if we do combine the two
-                            if (tempByName.ContainsKey(counter.Name))
-                            {
-                                //Yes this is a mess, this is mostly needed for GPU processes but will also be needed for process rollups
-                                //What it is for is if two counters exist with the same name we need to merge the final value for rainmeter
-                                //But we also need to merge the counter sample values as well so that way proper readable values can be translated next cycle
-                                tempByName[counter.Name].Value += counter.Value;
-                                tempByName[counter.Name].Sample = new CounterSample(tempByName[counter.Name].Sample.RawValue + counter.Sample.RawValue,
-                                    tempByName[counter.Name].Sample.BaseValue, tempByName[counter.Name].Sample.CounterFrequency,
-                                    tempByName[counter.Name].Sample.SystemFrequency, tempByName[counter.Name].Sample.TimeStamp,
-                                    tempByName[counter.Name].Sample.TimeStamp100nSec, tempByName[counter.Name].Sample.CounterType);
+                                if (this.ByName.ContainsKey(subCategory))
+                                {
+                                    this.ByUsage[subCategory] = tempByUsage;
+                                }
+                                else
+                                {
+                                    this.ByUsage.Add(subCategory, tempByUsage);
+                                }
                             }
                             else
                             {
-                                tempByName.Add(counter.Name, counter);
+                                API.Log((int)API.LogType.Debug, "Could not find a performance counter in " + category + " called " + subCategory);
                             }
                         }
-                        tempByUsage = tempByName.Values.ToList();
-                        tempByUsage.Sort();
-
-                        this.ByName = tempByName;
-                        this.ByUsage = tempByUsage;
                     }
                     finally
                     {
@@ -192,14 +238,12 @@ namespace ProcessMonitor
                 }
             }
 
-            public CounterLists(string category, string subCategory, String ID, bool isPID, int updateInMS)
+            public CounterLists(String category, String subCategory, String ID, bool isPID, int updateInMS)
             {
-                this.ByName = new Dictionary<string, Counter>();
-                this.ByUsage = new List<Counter>();
-                this.IDs = new Dictionary<String, int>
-                {
-                    { ID, updateInMS }
-                };
+                this.ByName = new Dictionary<String, Dictionary<String, Counter>>();
+                this.ByUsage = new Dictionary<String, List<Counter>>();
+                this.updateRates = new Dictionary<String, int> { { ID, updateInMS } };
+                this.subCategories = new Dictionary<String, String> { { ID, subCategory } };
 
                 if (isPID)
                 {
@@ -213,24 +257,26 @@ namespace ProcessMonitor
                     }
                 }
 
-                this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(category, subCategory, isPID), null, 0, updateInMS);
+                this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(category, subCategories, isPID), null, 0, updateInMS);
                 this.UpdateTimerRate = updateInMS;
             }
 
             //Add new ID to instance and check update timer needs to be decrease (Will also update rate if an instance already existed)
-            public void AddInstance(string category, string subCategory, String ID, bool isPID, int updateInMS)
+            public void AddInstance(String category, String subCategory, String ID, bool isPID, int updateInMS)
             {
-                if (!this.IDs.ContainsKey(ID))
+                if (!this.updateRates.ContainsKey(ID))
                 {
-                    this.IDs.Add(ID, updateInMS);
+                    this.updateRates.Add(ID, updateInMS);
+
                     if (this.UpdateTimerRate > updateInMS)
                     {
                         this.UpdateTimer.Change(0, updateInMS);
                     }
                 }
-                else if(this.IDs[ID] != updateInMS)
-                {
-                    this.IDs[ID] = updateInMS;
+                else if(this.updateRates[ID] != updateInMS)
+                    {
+                    this.updateRates[ID] = updateInMS;
+
                     if (this.UpdateTimerRate > updateInMS)
                     {
                         if (this.UpdateTimer != null)
@@ -240,18 +286,27 @@ namespace ProcessMonitor
                         //Somehow timer got deintialized and we ended up here without it being reinitialized
                         else
                         {
-                            this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(category, subCategory, isPID), null, 0, updateInMS);
+                            this.UpdateTimer = new Timer((stateInfo) => UpdateCounters(category, subCategories, isPID), null, 0, updateInMS);
                         }
                     }
+                }
+
+                if (!this.subCategories.ContainsKey(ID))
+                {
+                    this.subCategories.Add(ID, subCategory);
+                }
+                else if (this.subCategories[ID] != subCategory)
+                {
+                    this.subCategories[ID] = subCategory;
                 }
             }
             public void RemoveInstance(String ID)
             {
-                if(this.IDs.ContainsKey(ID) && this.IDs[ID] == this.UpdateTimerRate)
+                if (this.updateRates.ContainsKey(ID) && this.updateRates[ID] == this.UpdateTimerRate)
                 {
                     if (pidIDs.ContainsKey(ID))
                     {
-                        if(pidIDs.Count == 1)
+                        if (pidIDs.Count == 1)
                         {
                             pidUpdateTimer.Dispose();
                             pidUpdateTimer = null;
@@ -260,12 +315,12 @@ namespace ProcessMonitor
                         pidIDs.Remove(ID);
                     }
                     //There is more than one ID using this, find the new update rate
-                    if (this.IDs.Count > 1)
+                    if (this.updateRates.Count > 1)
                     {
                         int min = int.MaxValue;
 
                         //Find smallest update time in list (Should be near O(1) in real world since no one should be changing this)
-                        foreach (int interval in this.IDs.Values)
+                        foreach (int interval in this.updateRates.Values)
                         {
                             if (interval < min)
                             {
@@ -288,21 +343,21 @@ namespace ProcessMonitor
                         this.UpdateTimerRate = int.MaxValue;
                     }
                 }
-                this.IDs.Remove(ID);
+                this.updateRates.Remove(ID);
             }
 
             public int Count()
             {
-                return this.IDs.Count();
+                return this.updateRates.Count();
             }
         }
 
         //This holds all the counters we are monitoring, when one stops being monitored it will be removed from the list
         //Each counter handles its own update
-        public static Dictionary<string, CounterLists> counters = new Dictionary<string, CounterLists>(sizeof(MeasureType));
+        public static Dictionary<String, CounterLists> counters = new Dictionary<String, CounterLists>(sizeof(MeasureType));
 
         //This is a list of all the PIDs and their associated process name, used to decode pids to process names
-        private static Dictionary<int, string> pids = new Dictionary<int, string>();
+        private static Dictionary<int, String> pids = new Dictionary<int, String>();
         //Used to update pids, is set to lowest update rate of a counter that needs it
         private static Timer pidUpdateTimer;
         private static int pidUpdateTimerRate = int.MaxValue;
@@ -314,7 +369,7 @@ namespace ProcessMonitor
                 try
                 {
                     var pidCounter = new PerformanceCounterCategory("Process").ReadCategory()["ID Process"];
-                    var temp = new Dictionary<int, string>(pidCounter.Count);
+                    var temp = new Dictionary<int, String>(pidCounter.Count);
 
                     foreach (InstanceData pid in pidCounter.Values)
                     {
@@ -345,10 +400,10 @@ namespace ProcessMonitor
 
 
         //Adds a new counter
-        public static void AddCounter(string category, string subCategory, String ID, bool isPID = false, int updateInMS = 1000)
+        public static void AddCounter(String category, String subCategory, String ID, bool isPID = false, int updateInMS = 1000)
         {
             //If it already exists just add the ID and update rate to the list
-            if (counters.TryGetValue(category + '|' + subCategory, out CounterLists counter))
+            if (counters.TryGetValue(category, out CounterLists counter))
             {
                 counter.AddInstance(category, subCategory, ID, isPID, updateInMS);
             }
@@ -356,27 +411,27 @@ namespace ProcessMonitor
             else
             {
                 CounterLists newCounter = new CounterLists(category, subCategory, ID, isPID, updateInMS);
-                counters.Add(category + '|' + subCategory, newCounter);
+                counters.Add(category, newCounter);
             }
 
         }
-        public static void RemoveCounter(string category, string subCategory, String ID)
+        public static void RemoveCounter(String category, String subCategory, String ID)
         {
             //If counter exists remove ID from it
-            if (counters.TryGetValue(category + '|' + subCategory, out CounterLists counter))
+            if (counters.TryGetValue(category, out CounterLists counter))
             {
                 counter.RemoveInstance(ID);
                 //If nothing is referencing that counter anymore remove and deallocate it
                 if (counter.Count() == 0)
                 {
                     counter = null;
-                    counters.Remove(category + '|' + subCategory);
+                    counters.Remove(category);
                 }
             }
         }
-        public static bool GetCounterLists(string category, string subCategory, out CounterLists counterLists)
+        public static bool GetCounterLists(String category, String subCategory, out CounterLists counterLists)
         {
-            return Counters.counters.TryGetValue(category + "|" + subCategory, out counterLists);
+            return Counters.counters.TryGetValue(category, out counterLists);
         }
     }
 
@@ -388,9 +443,12 @@ namespace ProcessMonitor
         }
         public Rainmeter.API API;
 
-        public MeasureCategory myCatagories;
+        public MeasureCategory myCategories;
         public int myInstance;
-        public string myName;
+        public String myName;
+
+        public bool isRollup;
+        public bool isPercent;
     }
 
     public class Plugin
@@ -407,7 +465,7 @@ namespace ProcessMonitor
         {
             Measure measure = (Measure)data;
 
-            Counters.RemoveCounter(measure.myCatagories.Category, measure.myCatagories.SubCategory, measure.API.GetSkin() + measure.API.GetMeasureName());
+            Counters.RemoveCounter(measure.myCategories.Category, measure.myCategories.SubCategory, measure.API.GetSkin() + measure.API.GetMeasureName());
 
             GCHandle.FromIntPtr(data).Free();
         }
@@ -427,29 +485,32 @@ namespace ProcessMonitor
                 //Check if type is custom if it is not just set category, if it is then read custom options
                 if (type != MeasureType.CUSTOM)
                 {
-                    measure.myCatagories = new MeasureCategory(type);
+                    measure.myCategories = new MeasureCategory(type);
 
                     if (type == MeasureType.GPU || type == MeasureType.VRAM)
                     {
                         isPID = true;
                     }
+
                 }
                 else
                 {
-                    measure.myCatagories = new MeasureCategory(
-                        measure.API.ReadString("Category", "Process"), 
+                    measure.myCategories = new MeasureCategory(
+                        measure.API.ReadString("Category", "Process"),
                         measure.API.ReadString("SubCategory", "% Processor Time"));
-
-                    isPID = measure.API.ReadInt("DecodePIDs", 0) != 0 ? true : false; 
                 }
+
+                measure.isRollup = measure.API.ReadInt("Rollup", 0) != 0;
+                //Is precent is on by default when measure type is CPU
+                measure.isPercent = measure.API.ReadInt("Percent", type == MeasureType.CPU ? 1 : 0) != 0;
             }
             catch
             {
-                measure.API.Log(API.LogType.Error, "Type=" + measure.API.ReadString("Type", "CPU") + " was not in the list of predefined catagories, assuming CPU");
-                measure.myCatagories = new MeasureCategory(MeasureType.CPU);
+                measure.API.Log(API.LogType.Error, "Type=" + measure.API.ReadString("Type", "CPU") + " was not in the list of predefined categories, assuming CPU");
+                measure.myCategories = new MeasureCategory(MeasureType.CPU);
             }
 
-            Counters.AddCounter(measure.myCatagories.Category, measure.myCatagories.SubCategory, measure.API.GetSkin()+measure.API.GetMeasureName(),isPID);
+            Counters.AddCounter(measure.myCategories.Category, measure.myCategories.SubCategory, measure.API.GetSkin() + measure.API.GetMeasureName(), isPID);
 
             measure.myInstance = measure.API.ReadInt("Instance", -1);
             measure.myName = measure.API.ReadString("Name", null);
@@ -459,27 +520,43 @@ namespace ProcessMonitor
         public static double Update(IntPtr data)
         {
             Measure measure = (Measure)data;
+            double ret = 0;
             
-            //@TODO use function for this instead of direct access
-            if (Counters.GetCounterLists(measure.myCatagories.Category, measure.myCatagories.SubCategory, out Counters.CounterLists counters))
+            if (Counters.GetCounterLists(measure.myCategories.Category, measure.myCategories.SubCategory, out Counters.CounterLists counters))
             {
-                if (counters.ByUsage.Count > measure.myInstance && measure.myInstance >= 0)
+                if (counters.ByUsage.Count > measure.myInstance && measure.myInstance >= 0 && counters.ByUsage.ContainsKey(measure.myCategories.SubCategory))
                 {
-                    return counters.ByUsage[measure.myInstance].Value;
+                    ret = counters.ByUsage[measure.myCategories.SubCategory][measure.myInstance].Value;
                 }
-                else if(counters.ByName.Count > 0 && measure.myName.Length > 0)
+                else if (measure.myName.Length > 0 && counters.ByUsage.ContainsKey(measure.myCategories.SubCategory) && counters.ByName[measure.myCategories.SubCategory].Count > 0)
                 {
-                    if (counters.ByName.TryGetValue(measure.myName, out Counter counter))
+                    if(measure.myName == "_Sum")
                     {
-                        return counter.Value;
+                        ret = counters._Sum[measure.myCategories.SubCategory];
+                    }
+                    else if (counters.ByName[measure.myCategories.SubCategory].TryGetValue(measure.myName, out Counter counter))
+                    {
+                        ret = counter.Value;
                     }
                     else
                     {
                         measure.API.Log(API.LogType.Debug, "Could not find a counter with the name " + measure.myName);
                     }
                 }
+
+                if(measure.isPercent && counters.ByUsage.ContainsKey(measure.myCategories.SubCategory))
+                {
+                    if(counters.ByName[measure.myCategories.SubCategory].TryGetValue("_Total", out Counter counter) && counter.Value > 0)
+                    {
+                        ret = (ret / counter.Value) * 100;
+                    }
+                    else if (counters._Sum.ContainsKey(measure.myCategories.SubCategory) && counters._Sum[measure.myCategories.SubCategory] > 0)
+                    {
+                        ret = (ret / counters._Sum[measure.myCategories.SubCategory]) * 100;
+                    }
+                }
             }
-            return 0.0;
+            return ret;
         }
 
         [DllExport]
@@ -487,15 +564,20 @@ namespace ProcessMonitor
         {
             Measure measure = (Measure)data;
 
-            if (Counters.GetCounterLists(measure.myCatagories.Category, measure.myCatagories.SubCategory, out Counters.CounterLists counters))
+            if (Counters.GetCounterLists(measure.myCategories.Category, measure.myCategories.SubCategory, out Counters.CounterLists counters))
             {
-                if (counters.ByUsage.Count > measure.myInstance && measure.myInstance >= 0)
+                if (counters.ByUsage.Count > measure.myInstance && measure.myInstance >= 0 && counters.ByUsage.ContainsKey(measure.myCategories.SubCategory))
                 {
-                    return Marshal.StringToHGlobalUni(counters.ByUsage[measure.myInstance].Name);
+                    return Marshal.StringToHGlobalUni(counters.ByUsage[measure.myCategories.SubCategory][measure.myInstance].Name);
                 }
-                else if (counters.ByName.Count > 0 && measure.myName.Length > 0)
+                else if (counters.ByName.Count > 0 && measure.myName.Length > 0 && counters.ByUsage.ContainsKey(measure.myCategories.SubCategory))
                 {
-                    if (counters.ByName.TryGetValue(measure.myName, out Counter counter))
+                    //@TODO Should we maybe just always return the name?
+                    if (measure.myName == "_Sum")
+                    {
+                        return Marshal.StringToHGlobalUni("_Sum");
+                    }
+                    else if (counters.ByName[measure.myCategories.SubCategory].TryGetValue(measure.myName, out Counter counter))
                     {
                         return Marshal.StringToHGlobalUni(counter.Name);
                     }
@@ -516,7 +598,7 @@ namespace ProcessMonitor
 
         //[DllExport]
         //public static IntPtr (IntPtr data, int argc,
-        //    [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPWStr, SizeParamIndex = 1)] string[] argv)
+        //    [MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPWStr, SizeParamIndex = 1)] String[] argv)
         //{
         //    Measure measure = (Measure)data;
         //

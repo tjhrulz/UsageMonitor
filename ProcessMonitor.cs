@@ -105,6 +105,18 @@ namespace ProcessMonitor
         }
     }
 
+    //Since 3.5 does not have tuples
+    //@TODO possibly make this a class and merge more into it
+    public struct TimerInfo
+    {
+        public String ID;
+        public int Rate;
+        public TimerInfo(String ID, int Rate)
+        {
+            this.ID = ID;
+            this.Rate = Rate;
+        }
+    }
     //Instances is basically a glorified dictionary that contains all the info and threads for updating each instance
     //Each instance is exposed in a ReadOnly fashion and is locked from reading during the write (Which is very short since temps are used)
     //Instances aggragate what measures are also using it and are only allocated and updated when a measure is still using them
@@ -118,44 +130,50 @@ namespace ProcessMonitor
             public Dictionary<String, List<Instance>> ByUsage;
             public Dictionary<String, double> _Sum;
 
-            //@TODO updateRates and counters can probably be merged to use new measureOptions object
             //@TODO check this entire class for possible redundancies that can be removed
+            //This is a dictionary, with counter as key, of all counters for this PerfMon object 
+            //And a dictionary, with ID as key, of all the options of measures referencing that counter
+            private Dictionary<String, Dictionary<String, MeasureOptions>> counterOptions;
+
+            //@TODO updateRates and counters can probably be merged to use new measureOptions object
             //This is a list of all the measures using the same object and what each ones update rate is (The lowest rate is the one used
-            private Dictionary<String, int> updateRates;
+            //private Dictionary<String, int> updateRates;
             //This is a list of subcategories for this object
-            private Dictionary<String, String> counters;
+            //private Dictionary<String, String> counters;
+
             //This is the thread that will update its update rate dynamically to the lowest update rate a measure has set
+            //@TODO Make object and add back in UpdateRates dictionary to that object?
             private Timer UpdateTimer;
-            private int UpdateTimerRate;
+            private TimerInfo UpdateTimerInfo = new TimerInfo("", int.MaxValue);
             private Object UpdateTimerLock = new Object();
 
             //Function used to update instances
-            private void UpdateInstances(MeasureOptions options)
+            private void UpdateInstances(String objectGroup)
             {
                 if (Monitor.TryEnter(UpdateTimerLock))
                 {
                     try
                     {
                         //@TODO check if anything more can be done to this to reduce CPU usage
-                        var currObject = new PerformanceCounterCategory(options.Object).ReadCategory();
+                        var currObject = new PerformanceCounterCategory(objectGroup).ReadCategory();
                         _Sum = new Dictionary<String, double>();
 
-                        foreach (String counter in counters.Values)
+                        foreach (var counter in counterOptions)
                         {
-                            var temp = currObject[counter];
+                            var temp = currObject[counter.Key];
 
                             //@TODO replace _Sum key check with the options check once options object is done
-                            if (temp != null && !_Sum.ContainsKey(counter))
+                            if (temp != null && !_Sum.ContainsKey(counter.Key))
                             {
                                 Dictionary<String, Instance> tempByName = new Dictionary<String, Instance>(temp.Count);
                                 List<Instance> tempByUsage = new List<Instance>(temp.Count);
-                                _Sum.Add(counter, 0);
+                                _Sum.Add(counter.Key, 0);
 
                                 foreach (InstanceData instanceData in temp.Values)
                                 {
                                     Instance instance = new Instance(instanceData.InstanceName, instanceData.RawValue, instanceData.Sample);
                                     //Instance name is a PID and needs to be converted to a process name
-                                    if (options.IsPID)
+                                    if (counter.Value.FirstOrDefault().Value.IsPID)
                                     {
                                         //"pid_12952_luid_0x00000000_0x00009AC6_phys_0_eng_0_engtype_3D"
                                         //"pid_11528_luid_0x00000000_0x0000A48E_phys_0"
@@ -181,13 +199,13 @@ namespace ProcessMonitor
                                         }
                                     }
 
-                                    if (this.ByName.ContainsKey(counter) && this.ByName[counter].ContainsKey(instance.Name))
+                                    if (this.ByName.ContainsKey(counter.Key) && this.ByName[counter.Key].ContainsKey(instance.Name))
                                     {
                                         //If last update or this update did not have a raw value then assume it is still 0
-                                        if (this.ByName[counter][instance.Name].Sample.RawValue != 0 
+                                        if (this.ByName[counter.Key][instance.Name].Sample.RawValue != 0 
                                             && instance.Sample.RawValue != 0)
                                         {
-                                            instance = new Instance(instance.Name, CounterSample.Calculate(this.ByName[counter][instance.Name].Sample, instance.Sample), instance.Sample);
+                                            instance = new Instance(instance.Name, CounterSample.Calculate(this.ByName[counter.Key][instance.Name].Sample, instance.Sample), instance.Sample);
                                         }
                                         else
                                         {
@@ -220,32 +238,32 @@ namespace ProcessMonitor
                                     //Custom sum variable so that special ones can be summed up without interfering with total
                                     if (instance.Name != "_Total")
                                     {
-                                        _Sum[counter] += instance.Value;
+                                        _Sum[counter.Key] += instance.Value;
                                     }
                                 }
                                 tempByUsage = tempByName.Values.ToList();
                                 tempByUsage.Sort();
 
-                                if (this.ByName.ContainsKey(counter))
+                                if (this.ByName.ContainsKey(counter.Key))
                                 {
-                                    this.ByName[counter] = tempByName;
+                                    this.ByName[counter.Key] = tempByName;
                                 }
                                 else
                                 {
-                                    this.ByName.Add(counter, tempByName);
+                                    this.ByName.Add(counter.Key, tempByName);
                                 }
-                                if (this.ByName.ContainsKey(counter))
+                                if (this.ByName.ContainsKey(counter.Key))
                                 {
-                                    this.ByUsage[counter] = tempByUsage;
+                                    this.ByUsage[counter.Key] = tempByUsage;
                                 }
                                 else
                                 {
-                                    this.ByUsage.Add(counter, tempByUsage);
+                                    this.ByUsage.Add(counter.Key, tempByUsage);
                                 }
                             }
                             else
                             {
-                                API.Log((int)API.LogType.Debug, "Could not find a performance counter in " + options.Object + " called " + counter);
+                                API.Log((int)API.LogType.Debug, "Could not find a performance counter in " + objectGroup + " called " + counter);
                             }
                         }
                     }
@@ -260,113 +278,159 @@ namespace ProcessMonitor
             {
                 this.ByName = new Dictionary<String, Dictionary<String, Instance>>();
                 this.ByUsage = new Dictionary<String, List<Instance>>();
-                this.updateRates = new Dictionary<String, int> { { options.ID, options.UpdateInMS } };
-                this.counters = new Dictionary<String, String> { { options.ID, options.Counter } };
+                this.counterOptions = new Dictionary<string, Dictionary< String, MeasureOptions>> { { options.Counter, new Dictionary<string, MeasureOptions> { { options.ID, options } } } };
 
                 if (options.IsPID)
                 {
                     pidIDs.Add(options.ID, options.UpdateInMS);
                     //@TODO This is still kinda slow, maybe going event based would be better
 
-                    if (pidUpdateTimer == null || pidUpdateTimerRate > options.UpdateInMS)
+                    if (pidUpdateTimer == null || pidUpdateTimerInfo.Rate > options.UpdateInMS)
                     {
-                        pidUpdateTimerRate = options.UpdateInMS;
-                        pidUpdateTimer = new Timer((stateInfo) => UpdatePIDs(), null, 0, options.UpdateInMS);
+                        pidUpdateTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                        pidUpdateTimer = new Timer((stateInfo) => UpdatePIDs(), null, 0, pidUpdateTimerInfo.Rate);
                     }
                 }
 
-                this.UpdateTimer = new Timer((stateInfo) => UpdateInstances(options), null, 0, options.UpdateInMS);
-                this.UpdateTimerRate = options.UpdateInMS;
+                this.UpdateTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                this.UpdateTimer = new Timer((stateInfo) => UpdateInstances(options.Object), null, 0, this.UpdateTimerInfo.Rate);
             }
 
             //Add new ID to instance and check update timer needs to be decrease (Will also update rate if an instance already existed)
             public void AddCounter(MeasureOptions options)
             {
-                if (!this.updateRates.ContainsKey(options.ID))
+                //If counter is already being monitored
+                if(this.counterOptions.TryGetValue(options.Counter, out Dictionary<String, MeasureOptions> counter))
                 {
-                    this.updateRates.Add(options.ID, options.UpdateInMS);
-
-                    if (this.UpdateTimerRate > options.UpdateInMS)
+                    //If measure was already used and just needs values updated
+                    if (counter.TryGetValue(options.ID, out MeasureOptions tempOptions))
                     {
-                        this.UpdateTimer.Change(0, options.UpdateInMS);
+                        //@TODO this is was more complex than just an update because what if counter or PerfMon object changes
+                        //      thus there needs to be safeguards against that either here or more likely in the plugin object
+                        tempOptions = options;
                     }
-                }
-                else if(this.updateRates[options.ID] != options.UpdateInMS)
-                    {
-                    this.updateRates[options.ID] = options.UpdateInMS;
-
-                    if (this.UpdateTimerRate > options.UpdateInMS)
-                    {
-                        if (this.UpdateTimer != null)
-                        {
-                            this.UpdateTimer.Change(0, options.UpdateInMS);
-                        }
-                        //Somehow timer got deintialized and we ended up here without it being reinitialized
-                        else
-                        {
-                            this.UpdateTimer = new Timer((stateInfo) => UpdateInstances(options), null, 0, options.UpdateInMS);
-                        }
-                    }
-                }
-
-                if (!this.counters.ContainsKey(options.ID))
-                {
-                    this.counters.Add(options.ID, options.Counter);
-                }
-                else if (this.counters[options.ID] != options.Counter)
-                {
-                    this.counters[options.ID] = options.Counter;
-                }
-            }
-            public void RemoveCounter(String ID)
-            {
-                if (this.updateRates.ContainsKey(ID) && this.updateRates[ID] == this.UpdateTimerRate)
-                {
-                    if (pidIDs.ContainsKey(ID))
-                    {
-                        if (pidIDs.Count == 1)
-                        {
-                            pidUpdateTimer.Dispose();
-                            pidUpdateTimer = null;
-                            pidUpdateTimerRate = int.MaxValue;
-                        }
-                        pidIDs.Remove(ID);
-                    }
-                    //There is more than one ID using this, find the new update rate
-                    if (this.updateRates.Count > 1)
-                    {
-                        int min = int.MaxValue;
-
-                        //Find smallest update time in list (Should be near O(1) in real world since no one should be changing this)
-                        foreach (int interval in this.updateRates.Values)
-                        {
-                            if (interval < min)
-                            {
-                                min = interval;
-                            }
-                            if (min == UpdateTimerRate)
-                            {
-                                break;
-                            }
-                        }
-
-                        this.UpdateTimerRate = min;
-                        this.UpdateTimer.Change(0, min);
-                    }
-                    //Only one timer just remove it and disable thread
                     else
                     {
-                        this.UpdateTimer.Dispose();
-                        this.UpdateTimer = null;
-                        this.UpdateTimerRate = int.MaxValue;
+                        counter.Add(options.ID, options);
                     }
                 }
-                this.updateRates.Remove(ID);
+                //If counter is not being monitored
+                else
+                {
+                    counterOptions.Add(options.Counter, new Dictionary<string, MeasureOptions> { { options.ID, options } });
+                }
+
+                if (this.UpdateTimerInfo.Rate > options.UpdateInMS)
+                {
+                    this.UpdateTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                    this.UpdateTimer.Change(0, this.UpdateTimerInfo.Rate);
+                }
+                if (options.IsPID)
+                {
+                    pidIDs.Add(options.ID, options.UpdateInMS);
+
+                    if (pidUpdateTimer == null || pidUpdateTimerInfo.Rate > options.UpdateInMS)
+                    {
+                        pidUpdateTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                        pidUpdateTimer = new Timer((stateInfo) => UpdatePIDs(), null, 0, pidUpdateTimerInfo.Rate);
+                    }
+                }
+            }
+            public void RemoveCounter(MeasureOptions options)
+            {
+                //If counter that needs to be removed exists
+                if (this.counterOptions.TryGetValue(options.Counter, out Dictionary<String, MeasureOptions> counter))
+                {
+                    //If measure options are removed
+                    if (counter.Remove(options.ID))
+                    {
+                        //If no more measures exist with this counter remove it
+                        if (counter.Count() == 0)
+                        {
+                            this.counterOptions.Remove(options.Counter);
+                        }
+
+
+                        if (options.IsPID && pidIDs.Remove(options.ID))
+                        {
+                            //If nothing needs PID update stop thread
+                            if (pidIDs.Count == 0)
+                            {
+                                pidUpdateTimer.Dispose();
+                                pidUpdateTimer = null;
+                                pidUpdateTimerInfo = new TimerInfo("", int.MaxValue);
+                            }
+                            else if (pidUpdateTimerInfo.ID == options.ID)
+                            {
+                                bool timerUpdated = false;
+                                TimerInfo newTimerInfo = new TimerInfo("", int.MaxValue);
+                                foreach (var tempCounter in this.counterOptions.Values)
+                                {
+                                    foreach (var tempOptions in tempCounter.Values)
+                                    {
+                                        if (options.UpdateInMS == pidUpdateTimerInfo.Rate)
+                                        {
+                                            timerUpdated = true;
+                                            newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                                            break;
+                                        }
+                                        else if (options.UpdateInMS < newTimerInfo.Rate)
+                                        {
+                                            newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                                        }
+                                    }
+                                    if (timerUpdated == true)
+                                    {
+                                        break;
+                                    }
+                                }
+                                pidUpdateTimerInfo = newTimerInfo;
+                                pidUpdateTimer.Change(0, pidUpdateTimerInfo.Rate);
+                            }
+                        }
+
+                        //Only one timer just remove it and disable thread
+                        if(this.counterOptions.Count() == 0)
+                        {
+                            this.UpdateTimer.Dispose();
+                            this.UpdateTimer = null;
+                            this.UpdateTimerInfo = new TimerInfo("", int.MaxValue);
+                        }
+                        else if(this.UpdateTimerInfo.ID == options.ID)
+                        {
+                            bool timerUpdated = false;
+                            TimerInfo newTimerInfo = new TimerInfo("", int.MaxValue);
+                            foreach (var tempCounter in this.counterOptions.Values)
+                            {
+                                foreach (var tempOptions in tempCounter.Values)
+                                {
+                                    if (options.UpdateInMS == this.UpdateTimerInfo.Rate)
+                                    {
+                                        timerUpdated = true;
+                                        newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                                        break;
+                                    }
+                                    else if (options.UpdateInMS < newTimerInfo.Rate)
+                                    {
+                                        newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                                    }
+                                }
+                                if (timerUpdated == true)
+                                {
+                                    break;
+                                }
+                            }
+                            this.UpdateTimerInfo = newTimerInfo;
+                            this.UpdateTimer.Change(0, this.UpdateTimerInfo.Rate);
+                        }
+                    }
+                }
             }
 
             public int Count()
             {
-                return this.updateRates.Count();
+                //@TODO I am not sure this will work well enough
+                return this.counterOptions.Count();
             }
         }
 
@@ -379,7 +443,7 @@ namespace ProcessMonitor
         //Used to update pids, is set to lowest update rate of a instance that needs it
         //@TODO share resources with update timers using process category
         private static Timer pidUpdateTimer;
-        private static int pidUpdateTimerRate = int.MaxValue;
+        private static TimerInfo pidUpdateTimerInfo = new TimerInfo("", int.MaxValue);
         private static Object pidUpdateLock = new Object();
         private static void UpdatePIDs()
         {
@@ -443,11 +507,10 @@ namespace ProcessMonitor
                 //If instance exists remove ID from it
                 if (instances.TryGetValue(options.Object, out InstanceLists instanceLists))
                 {
-                    instanceLists.RemoveCounter(options.ID);
+                    instanceLists.RemoveCounter(options);
                     //If nothing is referencing that instance anymore remove and deallocate it
                     if (instanceLists.Count() == 0)
                     {
-                        instanceLists = null;
                         instances.Remove(options.Object);
                     }
                 }

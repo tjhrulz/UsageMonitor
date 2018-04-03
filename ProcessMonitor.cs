@@ -33,47 +33,51 @@ namespace ProcessMonitor
             return (MeasureOptions)GCHandle.FromIntPtr(data).Target;
         }
         public Rainmeter.API API;
+        //One of these will normally be null
         public int Instance;
         public String Name;
 
+        //Predefined options
         public bool IsPercent = false;
         public bool IsPID = false;
         public bool IsRollup = true;
         public int BlockType = 1;
         public List<String> BlockList = new List<string> { "_Total" };
+        public int UpdateInMS = 1000;
 
-        public MeasureAlias Alias { get; private set; }
+        public string ID;
         public String Object;
         public String Counter;
-        public int updateInMS = 1000;
-
+        
         public void DeAlias(MeasureAlias alias)
         {
-            this.Alias = alias;
             if (alias == MeasureAlias.CPU)
             {
-                Object = "Process";
-                Counter = "% Processor Time";
+                this.Object = "Process";
+                this.Counter = "% Processor Time";
+                this.IsPercent = true;
             }
             else if (alias == MeasureAlias.RAM)
             {
-                Object = "Process";
-                Counter = "Working Set";
+                this.Object = "Process";
+                this.Counter = "Working Set";
             }
             else if (alias == MeasureAlias.IO)
             {
-                Object = "Process";
-                Counter = "IO Data Bytes/sec";
+                this.Object = "Process";
+                this.Counter = "IO Data Bytes/sec";
             }
             else if (alias == MeasureAlias.GPU)
             {
-                Object = "GPU Engine";
-                Counter = "Utilization Percentage";
+                this.Object = "GPU Engine";
+                this.Counter = "Utilization Percentage";
+                this.IsPID = true;
             }
             else if (alias == MeasureAlias.VRAM)
             {
-                Object = "GPU Process Memory";
-                Counter = "Dedicated Usage";
+                this.Object = "GPU Process Memory";
+                this.Counter = "Dedicated Usage";
+                this.IsPID = true;
             }
         }
     }
@@ -104,6 +108,7 @@ namespace ProcessMonitor
     //Instances is basically a glorified dictionary that contains all the info and threads for updating each instance
     //Each instance is exposed in a ReadOnly fashion and is locked from reading during the write (Which is very short since temps are used)
     //Instances aggragate what measures are also using it and are only allocated and updated when a measure is still using them
+    //@TODO Rename a bunch of stuff in this class by hand
     public static class Instances
     {
         public class InstanceLists
@@ -113,9 +118,11 @@ namespace ProcessMonitor
             public Dictionary<String, List<Instance>> ByUsage;
             public Dictionary<String, double> _Sum;
 
+            //@TODO updateRates and counters can probably be merged to use new measureOptions object
+            //@TODO check this entire class for possible redundancies that can be removed
             //This is a list of all the measures using the same object and what each ones update rate is (The lowest rate is the one used
             private Dictionary<String, int> updateRates;
-            //This is a list of subcategories for this measure
+            //This is a list of subcategories for this object
             private Dictionary<String, String> counters;
             //This is the thread that will update its update rate dynamically to the lowest update rate a measure has set
             private Timer UpdateTimer;
@@ -123,14 +130,14 @@ namespace ProcessMonitor
             private Object UpdateTimerLock = new Object();
 
             //Function used to update instances
-            private void UpdateInstances(String perfObject, Dictionary<String, String> counters, bool isPID)
+            private void UpdateInstances(MeasureOptions options)
             {
                 if (Monitor.TryEnter(UpdateTimerLock))
                 {
                     try
                     {
                         //@TODO check if anything more can be done to this to reduce CPU usage
-                        var currObject = new PerformanceCounterCategory(perfObject).ReadCategory();
+                        var currObject = new PerformanceCounterCategory(options.Object).ReadCategory();
                         _Sum = new Dictionary<String, double>();
 
                         foreach (String counter in counters.Values)
@@ -148,7 +155,7 @@ namespace ProcessMonitor
                                 {
                                     Instance instance = new Instance(instanceData.InstanceName, instanceData.RawValue, instanceData.Sample);
                                     //Instance name is a PID and needs to be converted to a process name
-                                    if (isPID)
+                                    if (options.IsPID)
                                     {
                                         //"pid_12952_luid_0x00000000_0x00009AC6_phys_0_eng_0_engtype_3D"
                                         //"pid_11528_luid_0x00000000_0x0000A48E_phys_0"
@@ -238,7 +245,7 @@ namespace ProcessMonitor
                             }
                             else
                             {
-                                API.Log((int)API.LogType.Debug, "Could not find a performance counter in " + perfObject + " called " + counter);
+                                API.Log((int)API.LogType.Debug, "Could not find a performance counter in " + options.Object + " called " + counter);
                             }
                         }
                     }
@@ -249,66 +256,66 @@ namespace ProcessMonitor
                 }
             }
 
-            public InstanceLists(String perfObject, String counter, String ID, bool isPID, int updateInMS)
+            public InstanceLists(MeasureOptions options)
             {
                 this.ByName = new Dictionary<String, Dictionary<String, Instance>>();
                 this.ByUsage = new Dictionary<String, List<Instance>>();
-                this.updateRates = new Dictionary<String, int> { { ID, updateInMS } };
-                this.counters = new Dictionary<String, String> { { ID, counter } };
+                this.updateRates = new Dictionary<String, int> { { options.ID, options.UpdateInMS } };
+                this.counters = new Dictionary<String, String> { { options.ID, options.Counter } };
 
-                if (isPID)
+                if (options.IsPID)
                 {
-                    pidIDs.Add(ID, updateInMS);
+                    pidIDs.Add(options.ID, options.UpdateInMS);
                     //@TODO This is still kinda slow, maybe going event based would be better
 
-                    if (pidUpdateTimer == null || pidUpdateTimerRate > updateInMS)
+                    if (pidUpdateTimer == null || pidUpdateTimerRate > options.UpdateInMS)
                     {
-                        pidUpdateTimerRate = updateInMS;
-                        pidUpdateTimer = new Timer((stateInfo) => UpdatePIDs(), null, 0, updateInMS);
+                        pidUpdateTimerRate = options.UpdateInMS;
+                        pidUpdateTimer = new Timer((stateInfo) => UpdatePIDs(), null, 0, options.UpdateInMS);
                     }
                 }
 
-                this.UpdateTimer = new Timer((stateInfo) => UpdateInstances(perfObject, counters, isPID), null, 0, updateInMS);
-                this.UpdateTimerRate = updateInMS;
+                this.UpdateTimer = new Timer((stateInfo) => UpdateInstances(options), null, 0, options.UpdateInMS);
+                this.UpdateTimerRate = options.UpdateInMS;
             }
 
             //Add new ID to instance and check update timer needs to be decrease (Will also update rate if an instance already existed)
-            public void AddCounter(String perfObject, String counter, String ID, bool isPID, int updateInMS)
+            public void AddCounter(MeasureOptions options)
             {
-                if (!this.updateRates.ContainsKey(ID))
+                if (!this.updateRates.ContainsKey(options.ID))
                 {
-                    this.updateRates.Add(ID, updateInMS);
+                    this.updateRates.Add(options.ID, options.UpdateInMS);
 
-                    if (this.UpdateTimerRate > updateInMS)
+                    if (this.UpdateTimerRate > options.UpdateInMS)
                     {
-                        this.UpdateTimer.Change(0, updateInMS);
+                        this.UpdateTimer.Change(0, options.UpdateInMS);
                     }
                 }
-                else if(this.updateRates[ID] != updateInMS)
+                else if(this.updateRates[options.ID] != options.UpdateInMS)
                     {
-                    this.updateRates[ID] = updateInMS;
+                    this.updateRates[options.ID] = options.UpdateInMS;
 
-                    if (this.UpdateTimerRate > updateInMS)
+                    if (this.UpdateTimerRate > options.UpdateInMS)
                     {
                         if (this.UpdateTimer != null)
                         {
-                            this.UpdateTimer.Change(0, updateInMS);
+                            this.UpdateTimer.Change(0, options.UpdateInMS);
                         }
                         //Somehow timer got deintialized and we ended up here without it being reinitialized
                         else
                         {
-                            this.UpdateTimer = new Timer((stateInfo) => UpdateInstances(perfObject, counters, isPID), null, 0, updateInMS);
+                            this.UpdateTimer = new Timer((stateInfo) => UpdateInstances(options), null, 0, options.UpdateInMS);
                         }
                     }
                 }
 
-                if (!this.counters.ContainsKey(ID))
+                if (!this.counters.ContainsKey(options.ID))
                 {
-                    this.counters.Add(ID, counter);
+                    this.counters.Add(options.ID, options.Counter);
                 }
-                else if (this.counters[ID] != counter)
+                else if (this.counters[options.ID] != options.Counter)
                 {
-                    this.counters[ID] = counter;
+                    this.counters[options.ID] = options.Counter;
                 }
             }
             public void RemoveCounter(String ID)
@@ -412,36 +419,36 @@ namespace ProcessMonitor
 
 
         //Adds a new instance
-        public static void AddCounter(String perfObject, String counter, String ID, bool isPID = false, int updateInMS = 1000)
+        public static void AddCounter(MeasureOptions options)
         {
-            if (perfObject != null && counter != null)
+            if (options.Object != null && options.Counter != null)
             {
                 //If it already exists just add the ID and update rate to the list
-                if (instances.TryGetValue(perfObject, out InstanceLists instance))
+                if (instances.TryGetValue(options.Object, out InstanceLists instanceLists))
                 {
-                    instance.AddCounter(perfObject, counter, ID, isPID, updateInMS);
+                    instanceLists.AddCounter(options);
                 }
                 //If instance does not yet exist it will need to be created
                 else
                 {
-                    InstanceLists newInstance = new InstanceLists(perfObject, counter, ID, isPID, updateInMS);
-                    instances.Add(perfObject, newInstance);
+                    instanceLists = new InstanceLists(options);
+                    instances.Add(options.Object, instanceLists);
                 }
             }
         }
-        public static void RemoveCounter(String perfObject, String counter, String ID)
+        public static void RemoveCounter(MeasureOptions options)
         {
-            if (perfObject != null && counter != null)
+            if (options.Object != null && options.Counter != null)
             {
                 //If instance exists remove ID from it
-                if (instances.TryGetValue(perfObject, out InstanceLists instance))
+                if (instances.TryGetValue(options.Object, out InstanceLists instanceLists))
                 {
-                    instance.RemoveCounter(ID);
+                    instanceLists.RemoveCounter(options.ID);
                     //If nothing is referencing that instance anymore remove and deallocate it
-                    if (instance.Count() == 0)
+                    if (instanceLists.Count() == 0)
                     {
-                        instance = null;
-                        instances.Remove(perfObject);
+                        instanceLists = null;
+                        instances.Remove(options.Object);
                     }
                 }
             }
@@ -469,9 +476,9 @@ namespace ProcessMonitor
         [DllExport]
         public static void Finalize(IntPtr data)
         {
-            MeasureOptions measure = (MeasureOptions)data;
+            MeasureOptions options = (MeasureOptions)data;
 
-            Instances.RemoveCounter(measure.Object, measure.Counter, measure.API.GetSkin() + measure.API.GetMeasureName());
+            Instances.RemoveCounter(options);
 
             GCHandle.FromIntPtr(data).Free();
         }
@@ -482,10 +489,8 @@ namespace ProcessMonitor
             MeasureOptions options = (MeasureOptions)data;
             options.API = (Rainmeter.API)rm;
 
-            bool isPID = false;
             String aliasString = options.API.ReadString("Alias", "");
             MeasureAlias alias = MeasureAlias.CUSTOM;
-
             try
             {
                 if (aliasString.Length > 0)
@@ -499,16 +504,8 @@ namespace ProcessMonitor
                 alias = MeasureAlias.CPU;
             }
             options.DeAlias(alias);
-            //Change defaults to match measure standard
-            if (alias == MeasureAlias.GPU || alias == MeasureAlias.VRAM)
-            {
-                isPID = true;
-            }
-            else if (alias == MeasureAlias.CPU)
-            {
-                options.IsPercent = true;
-            }
 
+            //Read what Performance Monitor info that we will be sampling
             String objectString = options.API.ReadString("Object", "");
             if (objectString.Length > 0)
             {
@@ -520,15 +517,22 @@ namespace ProcessMonitor
                 options.Counter = counterString;
             }
 
-            options.IsRollup = options.API.ReadInt("Rollup", 0) != 0;
+            //All the different options that change the way the info is measured/displayed
+            //Rollup is on by default
+            options.IsRollup = options.API.ReadInt("Rollup", Convert.ToInt32(options.IsRollup)) != 0;
             //Is precent is on by default when measure type is CPU
             options.IsPercent = options.API.ReadInt("Percent", Convert.ToInt32(options.IsPercent)) != 0;
             //Is pid is on by default when measure type is GPU or VRAM
-            isPID = options.API.ReadInt("PIDToName", Convert.ToInt32(isPID)) != 0;
+            options.IsPID = options.API.ReadInt("PIDToName", Convert.ToInt32(options.IsPID)) != 0;
+            //Get the update rate of the skin @TODO Make based on Update*UpdateRate*UpdateDivider
+            options.UpdateInMS = options.API.ReadInt("UpdateRate", options.UpdateInMS);
+            //ID of this options set
+            options.ID = options.API.GetSkin() + options.API.GetMeasureName();
 
             //Setup new instance
-            Instances.AddCounter(options.Object, options.Counter, options.API.GetSkin() + options.API.GetMeasureName(), isPID);
+            Instances.AddCounter(options);
 
+            //One of these will be used later to access data
             options.Instance = options.API.ReadInt("Instance", -1);
             options.Name = options.API.ReadString("Name", null);
         }
@@ -536,47 +540,47 @@ namespace ProcessMonitor
         [DllExport]
         public static double Update(IntPtr data)
         {
-            MeasureOptions measure = (MeasureOptions)data;
+            MeasureOptions options = (MeasureOptions)data;
             double ret = 0;
             
-            if (Instances.GetInstanceLists(measure.Object, measure.Counter, out Instances.InstanceLists instances))
+            if (Instances.GetInstanceLists(options.Object, options.Counter, out Instances.InstanceLists instances))
             {
-                if (instances.ByUsage.Count > measure.Instance && measure.Instance >= 0 && instances.ByUsage.ContainsKey(measure.Counter))
+                if (instances.ByUsage.Count > options.Instance && options.Instance >= 0 && instances.ByUsage.ContainsKey(options.Counter))
                 {
-                    ret = instances.ByUsage[measure.Counter][measure.Instance].Value;
+                    ret = instances.ByUsage[options.Counter][options.Instance].Value;
                 }
-                else if (measure.Name.Length > 0 && instances.ByUsage.ContainsKey(measure.Counter) && instances.ByName[measure.Counter].Count > 0)
+                else if (options.Name.Length > 0 && instances.ByUsage.ContainsKey(options.Counter) && instances.ByName[options.Counter].Count > 0)
                 {
-                    if(measure.Name == "_Sum")
+                    if(options.Name == "_Sum")
                     {
-                        ret = instances._Sum[measure.Counter];
+                        ret = instances._Sum[options.Counter];
                     }
-                    else if (instances.ByName[measure.Counter].TryGetValue(measure.Name, out Instance instance))
+                    else if (instances.ByName[options.Counter].TryGetValue(options.Name, out Instance instance))
                     {
                         ret = instance.Value;
                     }
                     else
                     {
-                        measure.API.Log(API.LogType.Debug, "Could not find a instance with the name " + measure.Name);
+                        options.API.Log(API.LogType.Debug, "Could not find a instance with the name " + options.Name);
                     }
                 }
                 else
                 {
                     if (instances._Sum != null)
                     {
-                        ret = instances._Sum[measure.Counter];
+                        ret = instances._Sum[options.Counter];
                     }
                 }
 
-                if(measure.IsPercent && instances.ByUsage.ContainsKey(measure.Counter))
+                if(options.IsPercent && instances.ByUsage.ContainsKey(options.Counter))
                 {
-                    if(instances.ByName[measure.Counter].TryGetValue("_Total", out Instance instance) && instance.Value > 0)
+                    if(instances.ByName[options.Counter].TryGetValue("_Total", out Instance instance) && instance.Value > 0)
                     {
                         ret = (ret / instance.Value) * 100;
                     }
-                    else if (instances._Sum.ContainsKey(measure.Counter) && instances._Sum[measure.Counter] > 0)
+                    else if (instances._Sum.ContainsKey(options.Counter) && instances._Sum[options.Counter] > 0)
                     {
-                        ret = (ret / instances._Sum[measure.Counter]) * 100;
+                        ret = (ret / instances._Sum[options.Counter]) * 100;
                     }
                 }
             }
@@ -586,28 +590,28 @@ namespace ProcessMonitor
         [DllExport]
         public static IntPtr GetString(IntPtr data)
         {
-            MeasureOptions measure = (MeasureOptions)data;
+            MeasureOptions options = (MeasureOptions)data;
 
-            if (Instances.GetInstanceLists(measure.Object, measure.Counter, out Instances.InstanceLists instances))
+            if (Instances.GetInstanceLists(options.Object, options.Counter, out Instances.InstanceLists instances))
             {
-                if (instances.ByUsage.Count > measure.Instance && measure.Instance >= 0 && instances.ByUsage.ContainsKey(measure.Counter))
+                if (instances.ByUsage.Count > options.Instance && options.Instance >= 0 && instances.ByUsage.ContainsKey(options.Counter))
                 {
-                    return Marshal.StringToHGlobalUni(instances.ByUsage[measure.Counter][measure.Instance].Name);
+                    return Marshal.StringToHGlobalUni(instances.ByUsage[options.Counter][options.Instance].Name);
                 }
-                else if (instances.ByName.Count > 0 && measure.Name.Length > 0 && instances.ByUsage.ContainsKey(measure.Counter))
+                else if (instances.ByName.Count > 0 && options.Name.Length > 0 && instances.ByUsage.ContainsKey(options.Counter))
                 {
                     //@TODO Should we maybe just always return the name?
-                    if (measure.Name == "_Sum")
+                    if (options.Name == "_Sum")
                     {
                         return Marshal.StringToHGlobalUni("_Sum");
                     }
-                    else if (instances.ByName[measure.Counter].TryGetValue(measure.Name, out Instance instance))
+                    else if (instances.ByName[options.Counter].TryGetValue(options.Name, out Instance instance))
                     {
                         return Marshal.StringToHGlobalUni(instance.Name);
                     }
                     else
                     {
-                        measure.API.Log(API.LogType.Debug, "Could not find a instance with the name " + measure.Name);
+                        options.API.Log(API.LogType.Debug, "Could not find a instance with the name " + options.Name);
                     }
                 }
             }

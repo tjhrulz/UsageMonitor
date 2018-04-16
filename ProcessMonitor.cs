@@ -224,8 +224,9 @@ namespace ProcessMonitor
                                         foreach (var instance in tempByName.Values.ToList())
                                         {
                                             //Check that either item is not in the blacklist or is in the whitelist
-                                            if ((options.BlockType == BlockType.B && !options.BlockList.Contains(instance.Name)) 
-                                                || (options.BlockType == BlockType.W && options.BlockList.Contains(instance.Name)) )
+                                            if ((options.BlockType == BlockType.N)
+                                                || (options.BlockType == BlockType.B && !options.BlockList.Contains(instance.Name))
+                                                || (options.BlockType == BlockType.W && options.BlockList.Contains(instance.Name)))
                                             {
                                                 tempByUsage.Add(instance);
                                                 _Sum += instance.Value;
@@ -247,18 +248,8 @@ namespace ProcessMonitor
                                     {
                                         Instance instance = new Instance(instanceData.InstanceName, instanceData.RawValue, instanceData.Sample);
 
-                                        //If we are rolling up names then take the last # in the name and remove all after it
-                                        if (options.IsRollup)
-                                        {
-                                            int index = instance.Name.LastIndexOf('#');
-                                            if(index > 0)
-                                            {
-                                                instance.Name = instance.Name.Substring(0, index);
-                                            }
-                                        }
-
                                         //Instance name is a PID and needs to be converted to a process name
-                                        if (counter.Value.FirstOrDefault().Value.IsPID)
+                                        if (options.IsPID)
                                         {
                                             //"pid_12952_luid_0x00000000_0x00009AC6_phys_0_eng_0_engtype_3D"
                                             //"pid_11528_luid_0x00000000_0x0000A48E_phys_0"
@@ -281,6 +272,15 @@ namespace ProcessMonitor
                                                     API.Log((int)API.LogType.Debug, "Could not find a process with PID of " + myPid + " this PID will be ignored till found");
                                                     continue;
                                                 }
+                                            }
+                                        }
+                                        //If we are rolling up names then take the last # in the name and remove all after it
+                                        if (options.IsRollup)
+                                        {
+                                            int index = instance.Name.LastIndexOf('#');
+                                            if(index > 0)
+                                            {
+                                                instance.Name = instance.Name.Substring(0, index);
                                             }
                                         }
                                         
@@ -322,7 +322,7 @@ namespace ProcessMonitor
                                         }
                                         else
                                         {
-                                            mergedInstance = instance;
+                                            tempByName[mergedInstance.Name] = instance;
                                         }
 
                                         //Custom sum variable so that special ones can be summed up without interfering with total
@@ -331,7 +331,20 @@ namespace ProcessMonitor
                                             _Sum += instance.Value;
                                         }
                                     }
-                                    tempByUsage = tempByName.Values.ToList();
+                                    tempByUsage = new List<Instance>();
+
+                                    //@TODO this could be beter
+                                    foreach (var instance in tempByName.Values.ToList())
+                                    {
+                                        //Check that either item is not in the blacklist or is in the whitelist
+                                        if ((options.BlockType == BlockType.N) 
+                                            || (options.BlockType == BlockType.B && !options.BlockList.Contains(instance.Name))
+                                            || (options.BlockType == BlockType.W && options.BlockList.Contains(instance.Name)))
+                                        {
+                                            tempByUsage.Add(instance);
+                                            _Sum += instance.Value;
+                                        }
+                                    }
                                     tempByUsage.Sort();
 
                                     tempCounterList.ByName.Add(options.IsRollup, tempByName);

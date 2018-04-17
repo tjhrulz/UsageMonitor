@@ -51,18 +51,19 @@ namespace ProcessMonitor
         public BlockType BlockType { get; private set; } = BlockType.B;
         public HashSet<String> BlockList { get; private set; } = new HashSet<string> { "_Total" };
         //This is the key that is used to identify a matching blocklist
-        public String BlockString { get; private set; } = BlockType.B + "|" + String.Join(",", new List<string> { "_Total" }.ToArray());
+        //It is the lists rollup status, blocktype, and list
+        public String BlockString { get; private set; } = true.ToString() + BlockType.B + "|" + String.Join(",", new List<string> { "_Total" }.ToArray());
         public void UpdateBlockList(BlockType blockType, HashSet<String> blockList)
         {
             this.BlockType = blockType;
             this.BlockList = blockList;
-            this.BlockString = this.BlockType + "|" + String.Join(",", this.BlockList.ToArray());
+            this.BlockString = IsRollup.ToString() + this.BlockType + "|" + String.Join(",", this.BlockList.ToArray());
         }
         public void UpdateBlockList(BlockType blockType, String blockList)
         {
             this.BlockType = blockType;
             this.BlockList = new HashSet<string>(blockList.Split(','));
-            this.BlockString = this.BlockType + "|" + blockList;
+            this.BlockString = IsRollup.ToString() + this.BlockType + "|" + blockList;
         }
 
         public int UpdateInMS = 1000;
@@ -319,16 +320,22 @@ namespace ProcessMonitor
                                         if (mergedInstance == null)
                                         {
                                             tempByName.Add(instance.Name, instance);
+
+                                            //Custom sum variable so that special ones can be summed up without interfering with total
+                                            if (instance.Name != "_Total")
+                                            {
+                                                _Sum += instance.Value;
+                                            }
                                         }
                                         else
                                         {
                                             tempByName[mergedInstance.Name] = instance;
-                                        }
 
-                                        //Custom sum variable so that special ones can be summed up without interfering with total
-                                        if (instance.Name != "_Total")
-                                        {
-                                            _Sum += instance.Value;
+                                            //Custom sum variable so that special ones can be summed up without interfering with total
+                                            if (instance.Name != "_Total")
+                                            {
+                                                _Sum += instance.Value - mergedInstance.Value;
+                                            }
                                         }
                                     }
                                     tempByUsage = new List<Instance>();
@@ -342,7 +349,6 @@ namespace ProcessMonitor
                                             || (options.BlockType == BlockType.W && options.BlockList.Contains(instance.Name)))
                                         {
                                             tempByUsage.Add(instance);
-                                            _Sum += instance.Value;
                                         }
                                     }
                                     tempByUsage.Sort();
@@ -524,7 +530,7 @@ namespace ProcessMonitor
                 {
                     if (instanceNumber == 0 && instanceInfo._Sum.TryGetValue(options.BlockString, out double value))
                     {
-                        return new Instance("Sum", value, new CounterSample());
+                        return new Instance("Total", value, new CounterSample());
                     }
                     //Instances in Rainmeter are not going to be 0 indexed so adjust them to be 0 indexed now
                     instanceNumber--;
@@ -720,8 +726,29 @@ namespace ProcessMonitor
             //All the different options that change the way the info is measured/displayed
             //Rollup is on by default
             options.IsRollup = options.API.ReadInt("Rollup", Convert.ToInt32(options.IsRollup)) != 0;
+            String whitelist = options.API.ReadString("Whitelist", "");
+            if (whitelist.Length > 0)
+            {
+                options.UpdateBlockList(BlockType.W, whitelist);
+            }
+            else
+            {
+                String blacklist = options.API.ReadString("Blacklist", "_Total");
+                if (blacklist.Length > 0)
+                {
+                    options.UpdateBlockList(BlockType.B, blacklist);
+                }
+                else
+                {
+                    options.UpdateBlockList(BlockType.N, "");
+                }
+            }
             //Is precent is on by default when measure type is CPU
             options.IsPercent = options.API.ReadInt("Percent", Convert.ToInt32(options.IsPercent)) != 0;
+            if(options.IsPercent)
+            {
+                maxValue = 100;
+            }
             //Is pid is on by default when measure type is GPU or VRAM
             options.IsPID = options.API.ReadInt("PIDToName", Convert.ToInt32(options.IsPID)) != 0;
             //Get the update rate of the skin @TODO Make based on Update*UpdateRate*UpdateDivider
@@ -758,7 +785,7 @@ namespace ProcessMonitor
                 double sum = PerfMon.GetInstance(options, "_Total").Value;
 
                 //ret is 0 if it would be NaN
-                ret = sum > 0 ? ret / PerfMon.GetInstance(options, "_Total").Value * 100 : 0;
+                ret = sum > 0 ? ret / sum * 100 : 0;
             }
 
             return ret;

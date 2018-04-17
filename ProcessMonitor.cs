@@ -18,7 +18,10 @@ namespace ProcessMonitor
     {
         CPU,
         RAM,
+        RAMSHARED,
         IO,
+        IOREAD,
+        IOWRITE,
         GPU,
         VRAM,
         NETDOWN,
@@ -83,12 +86,27 @@ namespace ProcessMonitor
             else if (alias == MeasureAlias.RAM)
             {
                 this.Object = "Process";
+                this.Counter = "Working Set - Private";
+            }
+            else if (alias == MeasureAlias.RAMSHARED)
+            {
+                this.Object = "Process";
                 this.Counter = "Working Set";
             }
             else if (alias == MeasureAlias.IO)
             {
                 this.Object = "Process";
                 this.Counter = "IO Data Bytes/sec";
+            }
+            else if (alias == MeasureAlias.IOREAD)
+            {
+                this.Object = "Process";
+                this.Counter = "IO Read Bytes/sec";
+            }
+            else if (alias == MeasureAlias.IOWRITE)
+            {
+                this.Object = "Process";
+                this.Counter = "IO Write Bytes/sec";
             }
             else if (alias == MeasureAlias.GPU)
             {

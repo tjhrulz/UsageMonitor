@@ -308,7 +308,7 @@ namespace ProcessMonitor
                                                 }
                                                 catch
                                                 {
-                                                    API.Log((int)API.LogType.Debug, "Could not find a process with PID of " + myPid + " this PID will be ignored till found");
+                                                    options.API.Log(API.LogType.Debug, "Could not find a process with PID of " + myPid + " this PID will be ignored till found");
                                                     continue;
                                                 }
                                             }
@@ -397,7 +397,7 @@ namespace ProcessMonitor
                             CountersInfo = tempCounters;
                         }
                     }
-                    catch (Exception e)
+                    catch
                     {
                         this.CounterOptions.First().Value.First().Value.API.Log(API.LogType.Error, "Could not find a catagory called " + category);
                     }
@@ -652,7 +652,7 @@ namespace ProcessMonitor
                         catch
                         {
                             //PIDs should be unique but if they somehow are not log an error
-                            API.Log((int)API.LogType.Debug, "Found another process with the pid of" + pid);
+                            API.Log((int)API.LogType.Debug, "ProcessMonitor had a process ID collision on PID " + pid);
                         }
                     }
                     pids = temp;

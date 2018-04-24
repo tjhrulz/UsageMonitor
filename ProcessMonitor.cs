@@ -22,6 +22,7 @@ namespace ProcessMonitor
         IOWRITE,
         GPU,
         VRAM,
+        VRAMSHARED,
         NETDOWN,
         NETUP,
         CUSTOM
@@ -41,8 +42,8 @@ namespace ProcessMonitor
             return (MeasureOptions)GCHandle.FromIntPtr(data).Target;
         }
         public Rainmeter.API API;
-        //One of these will normally be empty/-1
-        public int Instance;
+        //One of these will normally be empty/0
+        public int Index;
         public String Name;
 
         //These are all the default values of the options (Some are overiden for certain aliases)
@@ -50,9 +51,9 @@ namespace ProcessMonitor
         public bool IsPID = false;
         public bool IsRollup = true;
         public BlockType BlockType { get; private set; } = BlockType.B;
-        public HashSet<String> BlockList { get; private set; } = new HashSet<string> { "_Total" };
+        public HashSet<String> BlockList { get; private set; } = new HashSet<string> { "_Total", "Idle" };
         //This is the key that is used to identify if a blocklist can be shared, it is the options rollup status, blocktype, and list
-        public String BlockString { get; private set; } = true.ToString() + BlockType.B + "|" + String.Join(",", new List<string> { "_Total" }.ToArray());
+        public String BlockString { get; private set; } = true.ToString() + BlockType.B + "|" + String.Join(",", new List<string> { "_Total", "Idle" }.ToArray());
         public void UpdateBlockList(BlockType blockType, HashSet<String> blockList)
         {
             this.BlockType = blockType;
@@ -73,6 +74,10 @@ namespace ProcessMonitor
         public string ID;
         public String Category;
         public String Counter;
+        //These are the original info before translation, if we detect that a specific category or counter does not exist we will try using these instead
+        //These are null if there was no translation applied
+        public String UntranslatedCategory = "";
+        public String UntranslatedCounter = "";
 
         //Takes an alias and changes the options to be ideal for that alias
         //@TODO add NETUP and NETDOWN support
@@ -121,6 +126,12 @@ namespace ProcessMonitor
                 this.Counter = "Dedicated Usage";
                 this.IsPID = true;
             }
+            else if (alias == MeasureAlias.VRAMSHARED)
+            {
+                this.Category = "GPU Process Memory";
+                this.Counter = "Shared Usage";
+                this.IsPID = true;
+            }
         }
     }
 
@@ -142,8 +153,13 @@ namespace ProcessMonitor
         public int CompareTo(Instance that)
         {
             if (this.Value > that.Value) return -1;
-            if (this.Value == that.Value) return 0;
-            return 1;
+            if (this.Value < that.Value) return 1;
+
+            //Try looking at raw values instead to break ties in the event of a tie
+            if (this.Sample.RawValue > that.Sample.RawValue) return -1;
+            if (this.Sample.RawValue < that.Sample.RawValue) return 1;
+
+            return 0;
         }
     }
     
@@ -248,6 +264,13 @@ namespace ProcessMonitor
                                 {
                                     //Throw and error and add nothing to the temp collections
                                     options.API.Log(API.LogType.Error, "Could not find a counter in catagory " + category + " called " + currCounter);
+
+                                    //If we are using a translation and this happens try it untranslated
+                                    if(options.UntranslatedCounter.Count() > 0)
+                                    {
+                                        options.Counter = options.UntranslatedCounter;
+                                        options.UntranslatedCounter = "";
+                                    }
                                 }
                                 //If there is already an ByName list that can be shared with this option set start from that
                                 else if (tempCounterInfo.ByName.TryGetValue(options.IsRollup, out tempByName))
@@ -399,7 +422,20 @@ namespace ProcessMonitor
                     }
                     catch
                     {
-                        this.CounterOptions.First().Value.First().Value.API.Log(API.LogType.Error, "Could not find a catagory called " + category);
+                        API.Log((int)API.LogType.Error, "Could not find a catagory called " + category);
+
+                        //If we are using a translation and this happens try it untranslated
+                        //foreach (Dictionary<String, MeasureOptions> options in this.CounterOptions.Values)
+                        //{
+                        //    foreach (MeasureOptions option in options.Values)
+                        //    {
+                        //        if (option.UntranslatedCategory.Count() > 0)
+                        //        {
+                        //            option.Category = option.UntranslatedCategory;
+                        //            option.UntranslatedCategory = "";
+                        //        }
+                        //    }
+                        //}
                     }
                     finally
                     {
@@ -433,6 +469,32 @@ namespace ProcessMonitor
             //Will also change update rate if new one is lower
             public void AddCounter(MeasureOptions options)
             {
+                //If we are not already updating add the counter
+                if (Monitor.TryEnter(UpdateTimerLock))
+                {
+                    try
+                    {
+                        UnsafeAddCounter(options);
+                    }
+                    finally
+                    {
+                        Monitor.Exit(UpdateTimerLock);
+                    }
+                }
+                else
+                {
+                    //Start a new thread and forget about it
+                    new Thread(() =>
+                    {
+                        lock (UpdateTimerLock)
+                        {
+                            UnsafeAddCounter(options);
+                        }
+                    }).Start();
+                }
+            }
+            private void UnsafeAddCounter(MeasureOptions options)
+            {
                 //If counter is already being monitored
                 if (this.CounterOptions.TryGetValue(options.Counter, out Dictionary<String, MeasureOptions> counter))
                 {
@@ -460,7 +522,7 @@ namespace ProcessMonitor
                     this.UpdateTimer.Change(0, this.UpdateTimerInfo.Rate);
                 }
                 //Since measures are unloaded in the same order they are loaded keep the last measure that was added to prevent ID thrashing when a skin is unloaded
-                else if(this.UpdateTimerInfo.Rate == options.UpdateInMS)
+                else if (this.UpdateTimerInfo.Rate == options.UpdateInMS)
                 {
                     this.UpdateTimerInfo.ID = options.ID;
                 }
@@ -479,6 +541,28 @@ namespace ProcessMonitor
             //Removes a a reference to a given counter (Counter is only removed if it is the last reference to that counter) 
             //Will also change update rate if the one removed was the last one with that update rate
             public void RemoveCounter(MeasureOptions options)
+            {
+                if (Monitor.TryEnter(UpdateTimerLock))
+                {
+                    try
+                    {
+                        UnsafeRemoveCounter(options);
+                    }
+                    finally
+                    {
+                        Monitor.Exit(UpdateTimerLock);
+                    }
+                }
+                else
+                {
+                    lock (UpdateTimerLock)
+                    {
+                        UnsafeRemoveCounter(options);
+                    }
+                }
+            }
+            //This uses no locks and does
+            private void UnsafeRemoveCounter(MeasureOptions options)
             {
                 //If category that needs to be removed exists
                 if (this.CounterOptions.TryGetValue(options.Counter, out Dictionary<String, MeasureOptions> counter))
@@ -510,15 +594,18 @@ namespace ProcessMonitor
                                 {
                                     foreach (var tempOptions in tempCounter.Values)
                                     {
-                                        if (options.UpdateInMS == pidUpdateTimerInfo.Rate)
+                                        if (tempOptions.ID != options.ID)
                                         {
-                                            timerUpdated = true;
-                                            newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
-                                            break;
-                                        }
-                                        else if (options.UpdateInMS < newTimerInfo.Rate)
-                                        {
-                                            newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                                            if (tempOptions.UpdateInMS == pidUpdateTimerInfo.Rate)
+                                            {
+                                                timerUpdated = true;
+                                                newTimerInfo = new TimerInfo(tempOptions.ID, tempOptions.UpdateInMS);
+                                                break;
+                                            }
+                                            else if (tempOptions.UpdateInMS < newTimerInfo.Rate)
+                                            {
+                                                newTimerInfo = new TimerInfo(tempOptions.ID, tempOptions.UpdateInMS);
+                                            }
                                         }
                                     }
                                     if (timerUpdated == true)
@@ -550,15 +637,18 @@ namespace ProcessMonitor
                             {
                                 foreach (var tempOptions in tempCategory.Values)
                                 {
-                                    if (options.UpdateInMS == this.UpdateTimerInfo.Rate)
+                                    if (tempOptions.ID != options.ID)
                                     {
-                                        timerUpdated = true;
-                                        newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
-                                        break;
-                                    }
-                                    else if (options.UpdateInMS < newTimerInfo.Rate)
-                                    {
-                                        newTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
+                                        if (tempOptions.UpdateInMS == this.UpdateTimerInfo.Rate)
+                                        {
+                                            timerUpdated = true;
+                                            newTimerInfo = new TimerInfo(tempOptions.ID, tempOptions.UpdateInMS);
+                                            break;
+                                        }
+                                        else if (tempOptions.UpdateInMS < newTimerInfo.Rate)
+                                        {
+                                            newTimerInfo = new TimerInfo(tempOptions.ID, tempOptions.UpdateInMS);
+                                        }
                                     }
                                 }
                                 if (timerUpdated == true)
@@ -572,6 +662,7 @@ namespace ProcessMonitor
                     }
                 }
             }
+
             //Get an instance of a counter ordered by value
             public Instance GetInstance(MeasureOptions options, int instanceNumber)
             {
@@ -637,7 +728,7 @@ namespace ProcessMonitor
                 try
                 {
                     var pidInstance = new PerformanceCounterCategory("Process").ReadCategory()["ID Process"];
-                    var temp = new Dictionary<int, String>(pidInstance.Count);
+                    var tempPIDs = new Dictionary<int, String>(pidInstance.Count);
 
                     foreach (InstanceData pid in pidInstance.Values)
                     {
@@ -646,7 +737,7 @@ namespace ProcessMonitor
                             //Both Idle and _Total share a PID, ignore them
                             if (pid.RawValue != 0)
                             {
-                                temp.Add((int)pid.RawValue, pid.InstanceName);
+                                tempPIDs.Add((int)pid.RawValue, pid.InstanceName);
                             }
                         }
                         catch
@@ -655,7 +746,7 @@ namespace ProcessMonitor
                             API.Log((int)API.LogType.Debug, "ProcessMonitor had a process ID collision on PID " + pid);
                         }
                     }
-                    pids = temp;
+                    pids = tempPIDs;
                 }
                 finally
                 {
@@ -718,14 +809,74 @@ namespace ProcessMonitor
             return new Instance(instanceName, 0, new CounterSample());
         }
     }
-
+    
     public class Plugin
     {
+        static Dictionary<string, string> engToCurrLanguage;
+
         [DllExport]
         public static void Initialize(ref IntPtr data, IntPtr rm)
         {
             data = GCHandle.ToIntPtr(GCHandle.Alloc(new MeasureOptions()));
             ((MeasureOptions)data).API = (Rainmeter.API)rm;
+
+            //Check system language, if it is different from en-US build translation list
+            var ci = System.Globalization.CultureInfo.InstalledUICulture.Name;
+            if (ci.CompareTo("en-US") == 0 && engToCurrLanguage == null)
+            {
+                //English list
+                //HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\009\Counter
+                //Current
+                //HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\CurrentLanguage\Counter
+                string[] eng = (string[])Microsoft.Win32.Registry.GetValue("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\009", "Counter", "");
+                string[] cur = (string[])Microsoft.Win32.Registry.GetValue("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Perflib\\CurrentLanguage", "Counter", "");
+                engToCurrLanguage = new Dictionary<string, string>(cur.Length / 2);
+
+                int i = 0;
+                bool isMatch = false;
+                foreach(string item in cur)
+                {
+                    if (i < eng.Length)
+                    {
+                        //If the current item is an ID
+                        if (int.TryParse(item, out int num))
+                        {
+                            if (int.TryParse(eng[i], out int engNum))
+                            {
+                                if (engNum == num)
+                                {
+                                    isMatch = true;
+                                }
+                                else if(engNum < num)
+                                {
+                                    while(engNum < num && i < eng.Length-1)
+                                    {
+                                        i++;
+                                        int.TryParse(eng[i], out engNum);
+                                    }
+                                    if (engNum == num)
+                                    {
+                                        isMatch = true;
+                                    }
+                                }
+                            }
+                        }
+                        else if (isMatch)
+                        {
+                            try
+                            {
+                                engToCurrLanguage.Add(eng[i], item);
+                                isMatch = false;
+                            }
+                            catch
+                            {
+
+                            }
+                        }
+                    }
+                    i++;
+                }
+            }
         }
 
         [DllExport]
@@ -764,12 +915,38 @@ namespace ProcessMonitor
             String categoryString = options.API.ReadString("Category", "");
             if (categoryString.Length > 0)
             {
-                options.Category= categoryString;
+                options.Category = categoryString;
             }
             String counterString = options.API.ReadString("Counter", "");
             if (counterString.Length > 0)
             {
                 options.Counter = counterString;
+            }
+
+            //Set options to defaults if for some reason they were never set
+            if (options.Category == null)
+            {
+                options.Category = "Process";
+            }
+            if (options.Counter == null)
+            {
+                options.Counter = "% Processor Time";
+            }
+
+            //If there is a translation dictionary use it
+            if (engToCurrLanguage != null)
+            {
+                if (engToCurrLanguage.TryGetValue(options.Category, out string translatedString))
+                {
+                    options.UntranslatedCategory = options.Category;
+                    options.Category = translatedString;
+                }
+                //If there is a translation dictionary use it
+                if (engToCurrLanguage.TryGetValue(options.Counter, out translatedString))
+                {
+                    options.UntranslatedCounter = options.Counter;
+                    options.Counter = translatedString;
+                }
             }
 
             //All the different options that change the way the info is measured/displayed
@@ -782,7 +959,7 @@ namespace ProcessMonitor
             }
             else
             {
-                String blacklist = options.API.ReadString("Blacklist", "_Total");
+                String blacklist = options.API.ReadString("Blacklist", "_Total,Idle");
                 if (blacklist.Length > 0)
                 {
                     options.UpdateBlockList(BlockType.B, blacklist);
@@ -800,7 +977,7 @@ namespace ProcessMonitor
             }
             //Is pid is on by default when measure type is GPU or VRAM
             options.IsPID = options.API.ReadInt("PIDToName", Convert.ToInt32(options.IsPID)) != 0;
-            options.UpdateInMS = options.API.ReadInt("UpdateRate", options.UpdateInMS);
+            options.UpdateInMS = options.API.ReadInt("CounterUpdateRate", options.UpdateInMS);
             //ID of this options set
             options.ID = options.API.GetSkin() + options.API.GetMeasureName();
 
@@ -808,7 +985,7 @@ namespace ProcessMonitor
             Catagories.AddMeasure(options);
 
             //One of these will be used later to access data
-            options.Instance = options.API.ReadInt("Instance", -1);
+            options.Index = options.API.ReadInt("Index", 0);
             options.Name = options.API.ReadString("Name", null);
         }
 
@@ -818,13 +995,13 @@ namespace ProcessMonitor
             MeasureOptions options = (MeasureOptions)data;
             double ret = 0;
 
-            if (options.Instance >= 0)
-            {
-                ret = Catagories.GetInstance(options, options.Instance).Value;
-            }
-            else if (options.Name.Length > 0)
+            if (options.Name.Length > 0)
             {
                 ret = Catagories.GetInstance(options, options.Name).Value;
+            }
+            else if (options.Index >= 0)
+            {
+                ret = Catagories.GetInstance(options, options.Index).Value;
             }
             //Scale it to be out of 100% if user requests it
             //@TODO have an option to make this _Sum based?
@@ -844,13 +1021,13 @@ namespace ProcessMonitor
         {
             MeasureOptions options = (MeasureOptions)data;
 
-            if (options.Instance >= 0)
-            {
-                return Marshal.StringToHGlobalUni(Catagories.GetInstance(options, options.Instance).Name);
-            }
-            else if (options.Name.Length > 0)
+            if (options.Name.Length > 0)
             {
                 return Marshal.StringToHGlobalUni(Catagories.GetInstance(options, options.Name).Name);
+            }
+            else if (options.Index >= 0)
+            {
+                return Marshal.StringToHGlobalUni(Catagories.GetInstance(options, options.Index).Name);
             }
 
             return IntPtr.Zero;

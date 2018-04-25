@@ -5,7 +5,6 @@ using Rainmeter;
 
 using System.Diagnostics;
 using System.Linq;
-using System.Collections;
 using System.Threading;
 
 namespace ProcessMonitor
@@ -47,6 +46,7 @@ namespace ProcessMonitor
         public String Name;
 
         //These are all the default values of the options (Some are overiden for certain aliases)
+        public bool IsRawValue = false;
         public bool IsPercent = false;
         public bool IsPID = false;
         public bool IsRollup = true;
@@ -63,7 +63,7 @@ namespace ProcessMonitor
         public void UpdateBlockList(BlockType blockType, String blockList)
         {
             this.BlockType = blockType;
-            this.BlockList = new HashSet<string>(blockList.Split(','));
+            this.BlockList = new HashSet<string>(blockList.Split(',').Select(p => p.Trim()));
             this.BlockString = IsRollup.ToString() + this.BlockType + "|" + blockList;
         }
 
@@ -918,16 +918,6 @@ namespace ProcessMonitor
                 options.Counter = counterString;
             }
 
-            //Set options to defaults if for some reason they were never set
-            if (options.Category == null)
-            {
-                options.Category = "Process";
-            }
-            if (options.Counter == null)
-            {
-                options.Counter = "% Processor Time";
-            }
-
             //If there is a translation dictionary use it
             if (engToCurrLanguage != null)
             {
@@ -946,6 +936,7 @@ namespace ProcessMonitor
 
             //All the different options that change the way the info is measured/displayed
             //Rollup is on by default
+            options.IsRawValue = options.API.ReadInt("RawValue", Convert.ToInt32(options.IsRawValue)) != 0;
             options.IsRollup = options.API.ReadInt("Rollup", Convert.ToInt32(options.IsRollup)) != 0;
             String whitelist = options.API.ReadString("Whitelist", "");
             if (whitelist.Length > 0)
@@ -976,8 +967,8 @@ namespace ProcessMonitor
             //ID of this options set
             options.ID = options.API.GetSkin() + options.API.GetMeasureName();
 
-            //Setup new instance
-            Catagories.AddMeasure(options);
+            //Setup new instance if counter and category are set
+            if(options.Counter?.Length > 0 && options.Category?.Length > 0) Catagories.AddMeasure(options);
 
             //One of these will be used later to access data
             options.Index = options.API.ReadInt("Index", 0);
@@ -989,23 +980,44 @@ namespace ProcessMonitor
         {
             MeasureOptions options = (MeasureOptions)data;
             double ret = 0;
+            if (options.Counter?.Length > 0 && options.Category?.Length > 0)
+            {
+                if (options.Name.Length > 0)
+                {
+                    //Return raw value if the option is set (RawValue is the value before it goes through CounterSample.Calculate to become human readable)
+                    if (options.IsRawValue)
+                    {
+                        ret = Catagories.GetInstance(options, options.Name).Sample.RawValue;
+                    }
+                    else
+                    {
+                        ret = Catagories.GetInstance(options, options.Name).Value;
+                    }
+                }
+                else if (options.Index >= 0)
+                {
+                    if (options.IsRawValue)
+                    {
+                        ret = Catagories.GetInstance(options, options.Index).Sample.RawValue;
+                    }
+                    else
+                    {
+                        ret = Catagories.GetInstance(options, options.Index).Value;
+                    }
+                }
+                else if(options.Index == -1)
+                {
+                    ret = 1337;
+                }
+                //Scale it to be out of 100% if user requests it
+                //@TODO have an option to make this _Sum based?
+                if (options.IsPercent)
+                {
+                    double sum = Catagories.GetInstance(options, "_Total").Value;
 
-            if (options.Name.Length > 0)
-            {
-                ret = Catagories.GetInstance(options, options.Name).Value;
-            }
-            else if (options.Index >= 0)
-            {
-                ret = Catagories.GetInstance(options, options.Index).Value;
-            }
-            //Scale it to be out of 100% if user requests it
-            //@TODO have an option to make this _Sum based?
-            if (options.IsPercent)
-            {
-                double sum = Catagories.GetInstance(options, "_Total").Value;
-
-                //ret is 0 if it would be NaN
-                ret = sum > 0 ? ret / sum * 100 : 0;
+                    //ret is 0 if it would be NaN
+                    ret = sum > 0 ? ret / sum * 100 : 0;
+                }
             }
 
             return ret;
@@ -1015,20 +1027,26 @@ namespace ProcessMonitor
         public static IntPtr GetString(IntPtr data)
         {
             MeasureOptions options = (MeasureOptions)data;
-
-            if (options.Name.Length > 0)
+            if (options.Counter?.Length > 0 && options.Category?.Length > 0)
             {
-                return Marshal.StringToHGlobalUni(Catagories.GetInstance(options, options.Name).Name);
-            }
-            else if (options.Index >= 0)
-            {
-                var temp = Catagories.GetInstance(options, options.Index);
-                //If temp.Value is 0 return empty string
-                if(temp.Value == 0)
+                if (options.Name.Length > 0)
                 {
-                    return Marshal.StringToHGlobalUni("");
+                    return Marshal.StringToHGlobalUni(Catagories.GetInstance(options, options.Name).Name);
                 }
-                return Marshal.StringToHGlobalUni(temp.Name);
+                else if (options.Index >= 0)
+                {
+                    var temp = Catagories.GetInstance(options, options.Index);
+                    //If temp.Value is 0 return empty string
+                    if (temp.Value == 0)
+                    {
+                        return Marshal.StringToHGlobalUni("");
+                    }
+                    return Marshal.StringToHGlobalUni(temp.Name);
+                }
+                else if (options.Index == -1)
+                {
+                    return Marshal.StringToHGlobalUni("tjhrulz loves you man");
+                }
             }
 
             return IntPtr.Zero;

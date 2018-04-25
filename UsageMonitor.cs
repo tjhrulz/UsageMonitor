@@ -36,11 +36,12 @@ namespace UsageMonitor
     //Contains all the options for the measure
     public class MeasureOptions
     {
-        static public implicit operator MeasureOptions(IntPtr data)
+        public API API;
+        public MeasureOptions(API API)
         {
-            return (MeasureOptions)GCHandle.FromIntPtr(data).Target;
+            this.API = API;
         }
-        public Rainmeter.API API;
+
         //One of these will normally be empty/0
         public int Index;
         public String Name;
@@ -804,7 +805,17 @@ namespace UsageMonitor
             return new Instance(instanceName, 0, new CounterSample());
         }
     }
-    
+
+    class Measure
+    {
+        static public implicit operator Measure(IntPtr data)
+        {
+            return (Measure)GCHandle.FromIntPtr(data).Target;
+        }
+        public Rainmeter.API API;
+        public MeasureOptions Options;
+    }
+
     public class Plugin
     {
         static Dictionary<string, string> engToCurrLanguage;
@@ -812,8 +823,8 @@ namespace UsageMonitor
         [DllExport]
         public static void Initialize(ref IntPtr data, IntPtr rm)
         {
-            data = GCHandle.ToIntPtr(GCHandle.Alloc(new MeasureOptions()));
-            ((MeasureOptions)data).API = (Rainmeter.API)rm;
+            data = GCHandle.ToIntPtr(GCHandle.Alloc(new Measure()));
+            ((Measure)data).API = (Rainmeter.API)rm;
 
             //Check system language, if it is different from en-US build translation list
             var ci = System.Globalization.CultureInfo.InstalledUICulture.Name;
@@ -877,9 +888,9 @@ namespace UsageMonitor
         [DllExport]
         public static void Finalize(IntPtr data)
         {
-            MeasureOptions options = (MeasureOptions)data;
+            Measure measure = (Measure)data;
 
-            Catagories.RemoveMeasure(options);
+            Catagories.RemoveMeasure(measure.Options);
 
             GCHandle.FromIntPtr(data).Free();
         }
@@ -887,10 +898,12 @@ namespace UsageMonitor
         [DllExport]
         public static void Reload(IntPtr data, IntPtr rm, ref double maxValue)
         {
-            MeasureOptions options = (MeasureOptions)data;
-            options.API = (Rainmeter.API)rm;
+            Measure measure = (Measure)data;
+            measure.Options = new MeasureOptions(measure.API);
+            MeasureOptions options = measure.Options;
+            measure.API = (Rainmeter.API)rm;
 
-            String aliasString = options.API.ReadString("Alias", "");
+            String aliasString = measure.API.ReadString("Alias", "");
             MeasureAlias alias = MeasureAlias.CUSTOM;
             try
             {
@@ -901,18 +914,18 @@ namespace UsageMonitor
             }
             catch
             {
-                options.API.Log(API.LogType.Error, "Type=" + aliasString + " was not valid,");
+                measure.API.Log(API.LogType.Error, "Type=" + aliasString + " was not valid,");
                 alias = MeasureAlias.CPU;
             }
             options.DeAlias(alias);
 
             //Read what Performance Monitor info that we will be sampling
-            String categoryString = options.API.ReadString("Category", "");
+            String categoryString = measure.API.ReadString("Category", "");
             if (categoryString.Length > 0)
             {
                 options.Category = categoryString;
             }
-            String counterString = options.API.ReadString("Counter", "");
+            String counterString = measure.API.ReadString("Counter", "");
             if (counterString.Length > 0)
             {
                 options.Counter = counterString;
@@ -936,16 +949,16 @@ namespace UsageMonitor
 
             //All the different options that change the way the info is measured/displayed
             //Rollup is on by default
-            options.IsRawValue = options.API.ReadInt("RawValue", Convert.ToInt32(options.IsRawValue)) != 0;
-            options.IsRollup = options.API.ReadInt("Rollup", Convert.ToInt32(options.IsRollup)) != 0;
-            String whitelist = options.API.ReadString("Whitelist", "");
+            options.IsRawValue = measure.API.ReadInt("RawValue", Convert.ToInt32(options.IsRawValue)) != 0;
+            options.IsRollup = measure.API.ReadInt("Rollup", Convert.ToInt32(options.IsRollup)) != 0;
+            String whitelist = measure.API.ReadString("Whitelist", "");
             if (whitelist.Length > 0)
             {
                 options.UpdateBlockList(BlockType.W, whitelist);
             }
             else
             {
-                String blacklist = options.API.ReadString("Blacklist", "_Total,Idle");
+                String blacklist = measure.API.ReadString("Blacklist", "_Total,Idle");
                 if (blacklist.Length > 0)
                 {
                     options.UpdateBlockList(BlockType.B, blacklist);
@@ -956,29 +969,30 @@ namespace UsageMonitor
                 }
             }
             //Is precent is on by default when measure type is CPU
-            options.IsPercent = options.API.ReadInt("Percent", Convert.ToInt32(options.IsPercent)) != 0;
+            options.IsPercent = measure.API.ReadInt("Percent", Convert.ToInt32(options.IsPercent)) != 0;
             if (options.IsPercent)
             {
                 maxValue = 100;
             }
             //Is pid is on by default when measure type is GPU or VRAM
-            options.IsPID = options.API.ReadInt("PIDToName", Convert.ToInt32(options.IsPID)) != 0;
-            //options.UpdateInMS = options.API.ReadInt("PollRate", options.UpdateInMS);
+            options.IsPID = measure.API.ReadInt("PIDToName", Convert.ToInt32(options.IsPID)) != 0;
+            //options.UpdateInMS = measure.API.ReadInt("PollRate", options.UpdateInMS);
             //ID of this options set
-            options.ID = options.API.GetSkin() + options.API.GetMeasureName();
+            options.ID = measure.API.GetSkin() + measure.API.GetMeasureName();
 
             //Setup new instance if counter and category are set
             if(options.Counter?.Length > 0 && options.Category?.Length > 0) Catagories.AddMeasure(options);
 
             //One of these will be used later to access data
-            options.Index = options.API.ReadInt("Index", 0);
-            options.Name = options.API.ReadString("Name", null);
+            options.Index = measure.API.ReadInt("Index", 0);
+            options.Name = measure.API.ReadString("Name", null);
         }
 
         [DllExport]
         public static double Update(IntPtr data)
         {
-            MeasureOptions options = (MeasureOptions)data;
+            Measure measure = (Measure)data;
+            MeasureOptions options = measure.Options;
             double ret = 0;
             if (options.Counter?.Length > 0 && options.Category?.Length > 0)
             {
@@ -1026,7 +1040,9 @@ namespace UsageMonitor
         [DllExport]
         public static IntPtr GetString(IntPtr data)
         {
-            MeasureOptions options = (MeasureOptions)data;
+            Measure measure = (Measure)data;
+            MeasureOptions options = measure.Options;
+
             if (options.Counter?.Length > 0 && options.Category?.Length > 0)
             {
                 if (options.Name.Length > 0)

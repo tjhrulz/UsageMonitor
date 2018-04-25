@@ -7,7 +7,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 
-namespace ProcessMonitor
+namespace UsageMonitor
 {
     //These are the supported aliases, these are used to make it easier for skins to just get a specific category
     //Note that Netdown & Netup are unimplemented
@@ -738,7 +738,7 @@ namespace ProcessMonitor
                         catch
                         {
                             //PIDs should be unique but if they somehow are not log an error
-                            API.Log((int)API.LogType.Debug, "ProcessMonitor had a process ID collision on PID " + pid);
+                            API.Log((int)API.LogType.Debug, "UsageMonitor had a process ID collision on PID " + pid);
                         }
                     }
                     pids = tempPIDs;

@@ -519,12 +519,7 @@ namespace ProcessMonitor
                 if (this.UpdateTimerInfo.Rate > options.UpdateInMS)
                 {
                     this.UpdateTimerInfo = new TimerInfo(options.ID, options.UpdateInMS);
-                    this.UpdateTimer.Change(0, this.UpdateTimerInfo.Rate);
-                }
-                //Since measures are unloaded in the same order they are loaded keep the last measure that was added to prevent ID thrashing when a skin is unloaded
-                else if (this.UpdateTimerInfo.Rate == options.UpdateInMS)
-                {
-                    this.UpdateTimerInfo.ID = options.ID;
+                    this.UpdateTimer.Change(5, this.UpdateTimerInfo.Rate);
                 }
 
                 if (options.IsPID)
@@ -617,7 +612,7 @@ namespace ProcessMonitor
                                 if (newTimerInfo.Rate != pidUpdateTimerInfo.Rate)
                                 {
                                     pidUpdateTimerInfo = newTimerInfo;
-                                    pidUpdateTimer.Change(0, pidUpdateTimerInfo.Rate);
+                                    pidUpdateTimer.Change(5, pidUpdateTimerInfo.Rate);
                                 }
                             }
                         }
@@ -657,7 +652,7 @@ namespace ProcessMonitor
                                 }
                             }
                             this.UpdateTimerInfo = newTimerInfo;
-                            this.UpdateTimer.Change(0, this.UpdateTimerInfo.Rate);
+                            this.UpdateTimer.Change(5, this.UpdateTimerInfo.Rate);
                         }
                     }
                 }
@@ -822,7 +817,7 @@ namespace ProcessMonitor
 
             //Check system language, if it is different from en-US build translation list
             var ci = System.Globalization.CultureInfo.InstalledUICulture.Name;
-            if (ci.CompareTo("en-US") == 0 && engToCurrLanguage == null)
+            if (ci.CompareTo("en-US") != 0 && engToCurrLanguage == null)
             {
                 //English list
                 //HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Perflib\009\Counter
@@ -977,7 +972,7 @@ namespace ProcessMonitor
             }
             //Is pid is on by default when measure type is GPU or VRAM
             options.IsPID = options.API.ReadInt("PIDToName", Convert.ToInt32(options.IsPID)) != 0;
-            options.UpdateInMS = options.API.ReadInt("CounterUpdateRate", options.UpdateInMS);
+            //options.UpdateInMS = options.API.ReadInt("PollRate", options.UpdateInMS);
             //ID of this options set
             options.ID = options.API.GetSkin() + options.API.GetMeasureName();
 
@@ -1027,7 +1022,13 @@ namespace ProcessMonitor
             }
             else if (options.Index >= 0)
             {
-                return Marshal.StringToHGlobalUni(Catagories.GetInstance(options, options.Index).Name);
+                var temp = Catagories.GetInstance(options, options.Index);
+                //If temp.Value is 0 return empty string
+                if(temp.Value == 0)
+                {
+                    return Marshal.StringToHGlobalUni("");
+                }
+                return Marshal.StringToHGlobalUni(temp.Name);
             }
 
             return IntPtr.Zero;

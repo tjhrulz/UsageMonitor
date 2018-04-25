@@ -164,15 +164,15 @@ namespace UsageMonitor
         }
     }
     
-    //This class handles taking a measures options and turning it in to an organized list of performance catagories that it then keeps up to date
+    //This class handles taking a measures options and turning it in to an organized list of performance categories that it then keeps up to date
     //It is highly scalable and multithreaded and will share as many resources as possible between measures
     //Resouce sharing is reduced slightly when two measures dont share the same block list, even more when they are not the same rollup state
-    //Minimal resources are shared between measures with different catagories and each category will run on its own thread
-    public static class Catagories
+    //Minimal resources are shared between measures with different categories and each category will run on its own thread
+    public static class Categories
     {
-        //This holds all the catagories we are monitoring, when one stops being monitored it will be removed from the dictionary
+        //This holds all the categories we are monitoring, when one stops being monitored it will be removed from the dictionary
         //Each category in here will be updated on its own thread
-        private static Dictionary<String, Counters> CatagoriesCounters = new Dictionary<String, Counters>(sizeof(MeasureAlias));
+        private static Dictionary<String, Counters> CategoriesCounters = new Dictionary<String, Counters>(sizeof(MeasureAlias));
 
         //Used for the timer info since .Net 3.5 does not have tuples
         //@TODO merge the timer class and timer variables to be part of the same class within CategoryLists
@@ -222,7 +222,7 @@ namespace UsageMonitor
             //@TODO Merge this into CounterInfo class
             private Dictionary<String, Dictionary<String, MeasureOptions>> CounterOptions;
 
-            //These control the thread in change of updating catagories, its update its update rate dynamically adjust based on lowest rate currently active
+            //These control the thread in change of updating categories, its update its update rate dynamically adjust based on lowest rate currently active
             private Timer UpdateTimer;
             private TimerInfo UpdateTimerInfo = new TimerInfo("", int.MaxValue);
             private Object UpdateTimerLock = new Object();
@@ -264,7 +264,7 @@ namespace UsageMonitor
                                 if (counterInstances == null)
                                 {
                                     //Throw and error and add nothing to the temp collections
-                                    options.API.Log(API.LogType.Error, "Could not find a counter in catagory " + category + " called " + currCounter);
+                                    options.API.Log(API.LogType.Error, "Could not find a counter in category " + category + " called " + currCounter);
 
                                     //If we are using a translation and this happens try it untranslated
                                     if(options.UntranslatedCounter.Count() > 0)
@@ -423,7 +423,7 @@ namespace UsageMonitor
                     }
                     catch
                     {
-                        API.Log((int)API.LogType.Error, "Could not find a catagory called " + category);
+                        API.Log((int)API.LogType.Error, "Could not find a category called " + category);
 
                         //If we are using a translation and this happens try it untranslated
                         //foreach (Dictionary<String, MeasureOptions> options in this.CounterOptions.Values)
@@ -757,7 +757,7 @@ namespace UsageMonitor
             if (options.Category != null && options.Counter != null)
             {
                 //If it already exists just add the ID and update rate to the list
-                if (CatagoriesCounters.TryGetValue(options.Category, out Counters counters))
+                if (CategoriesCounters.TryGetValue(options.Category, out Counters counters))
                 {
                     counters.AddCounter(options);
                 }
@@ -765,7 +765,7 @@ namespace UsageMonitor
                 else
                 {
                     counters = new Counters(options);
-                    CatagoriesCounters.Add(options.Category, counters);
+                    CategoriesCounters.Add(options.Category, counters);
                 }
             }
         }
@@ -775,13 +775,13 @@ namespace UsageMonitor
             if (options.Category != null && options.Counter != null)
             {
                 //If instance exists remove ID from it
-                if (CatagoriesCounters.TryGetValue(options.Category, out Counters counters))
+                if (CategoriesCounters.TryGetValue(options.Category, out Counters counters))
                 {
                     counters.RemoveCounter(options);
                     //If nothing is referencing that instance anymore remove and deallocate it
                     if (counters.Count() == 0)
                     {
-                        CatagoriesCounters.Remove(options.Category);
+                        CategoriesCounters.Remove(options.Category);
                     }
                 }
             }
@@ -789,7 +789,7 @@ namespace UsageMonitor
         //Get an instance of a counter ordered by value
         public static Instance GetInstance(MeasureOptions options, int instanceNumber)
         {
-            if (CatagoriesCounters.TryGetValue(options.Category, out Counters instanceLists))
+            if (CategoriesCounters.TryGetValue(options.Category, out Counters instanceLists))
             {
                 return instanceLists.GetInstance(options, instanceNumber);
             }
@@ -798,7 +798,7 @@ namespace UsageMonitor
         //Get an instance of a counter by name
         public static Instance GetInstance(MeasureOptions options, String instanceName)
         {
-            if (CatagoriesCounters.TryGetValue(options.Category, out Counters instanceLists))
+            if (CategoriesCounters.TryGetValue(options.Category, out Counters instanceLists))
             {
                 return instanceLists.GetInstance(options, instanceName);
             }
@@ -890,7 +890,7 @@ namespace UsageMonitor
         {
             Measure measure = (Measure)data;
 
-            Catagories.RemoveMeasure(measure.Options);
+            Categories.RemoveMeasure(measure.Options);
 
             GCHandle.FromIntPtr(data).Free();
         }
@@ -899,8 +899,8 @@ namespace UsageMonitor
         public static void Reload(IntPtr data, IntPtr rm, ref double maxValue)
         {
             Measure measure = (Measure)data;
-            measure.Options = new MeasureOptions(measure.API);
-            MeasureOptions options = measure.Options;
+            //We will set this to be the options of the measure later
+            MeasureOptions options = new MeasureOptions(measure.API);
             measure.API = (Rainmeter.API)rm;
 
             String aliasString = measure.API.ReadString("Alias", "");
@@ -914,7 +914,7 @@ namespace UsageMonitor
             }
             catch
             {
-                measure.API.Log(API.LogType.Error, "Type=" + aliasString + " was not valid,");
+                measure.API.Log(API.LogType.Error, "Alias=" + aliasString + " was not a recognized Alias");
                 alias = MeasureAlias.CPU;
             }
             options.DeAlias(alias);
@@ -979,13 +979,26 @@ namespace UsageMonitor
             //options.UpdateInMS = measure.API.ReadInt("PollRate", options.UpdateInMS);
             //ID of this options set
             options.ID = measure.API.GetSkin() + measure.API.GetMeasureName();
+            
+            //This is to prevent !SetOption/DynamicVariables=1 from causing us to keep outdated threads or info
+            //If we have existing options then this measure existed before and needs to be updated
+            if (measure.Options != null && measure.Options.Counter?.Length > 0 && measure.Options.Category?.Length > 0)
+            {
+                if (measure.Options.Category.CompareTo(options.Category) != 0)
+                {
+                    Categories.RemoveMeasure(measure.Options);
+                }
+            }
 
             //Setup new instance if counter and category are set
-            if(options.Counter?.Length > 0 && options.Category?.Length > 0) Catagories.AddMeasure(options);
+            if (options.Counter?.Length > 0 && options.Category?.Length > 0) Categories.AddMeasure(options);
 
             //One of these will be used later to access data
             options.Index = measure.API.ReadInt("Index", 0);
             options.Name = measure.API.ReadString("Name", null);
+
+            //Now that we are all done we can update the measures options
+            measure.Options = options;
         }
 
         [DllExport]
@@ -1001,22 +1014,22 @@ namespace UsageMonitor
                     //Return raw value if the option is set (RawValue is the value before it goes through CounterSample.Calculate to become human readable)
                     if (options.IsRawValue)
                     {
-                        ret = Catagories.GetInstance(options, options.Name).Sample.RawValue;
+                        ret = Categories.GetInstance(options, options.Name).Sample.RawValue;
                     }
                     else
                     {
-                        ret = Catagories.GetInstance(options, options.Name).Value;
+                        ret = Categories.GetInstance(options, options.Name).Value;
                     }
                 }
                 else if (options.Index >= 0)
                 {
                     if (options.IsRawValue)
                     {
-                        ret = Catagories.GetInstance(options, options.Index).Sample.RawValue;
+                        ret = Categories.GetInstance(options, options.Index).Sample.RawValue;
                     }
                     else
                     {
-                        ret = Catagories.GetInstance(options, options.Index).Value;
+                        ret = Categories.GetInstance(options, options.Index).Value;
                     }
                 }
                 else if(options.Index == -1)
@@ -1027,7 +1040,7 @@ namespace UsageMonitor
                 //@TODO have an option to make this _Sum based?
                 if (options.IsPercent)
                 {
-                    double sum = Catagories.GetInstance(options, "_Total").Value;
+                    double sum = Categories.GetInstance(options, "_Total").Value;
 
                     //ret is 0 if it would be NaN
                     ret = sum > 0 ? ret / sum * 100 : 0;
@@ -1047,11 +1060,11 @@ namespace UsageMonitor
             {
                 if (options.Name.Length > 0)
                 {
-                    return Marshal.StringToHGlobalUni(Catagories.GetInstance(options, options.Name).Name);
+                    return Marshal.StringToHGlobalUni(Categories.GetInstance(options, options.Name).Name);
                 }
                 else if (options.Index >= 0)
                 {
-                    var temp = Catagories.GetInstance(options, options.Index);
+                    var temp = Categories.GetInstance(options, options.Index);
                     //If temp.Value is 0 return empty string
                     if (temp.Value == 0)
                     {

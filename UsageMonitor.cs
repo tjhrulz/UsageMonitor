@@ -264,7 +264,7 @@ namespace UsageMonitor
                                 if (counterInstances == null)
                                 {
                                     //Throw and error and add nothing to the temp collections
-                                    options.API.Log(API.LogType.Error, "Could not find a counter in category " + category + " called " + currCounter);
+                                    options.API.Log(API.LogType.Debug, "Could not find a counter in category " + category + " called " + currCounter.Key);
 
                                     //If we are using a translation and this happens try it untranslated
                                     if(options.UntranslatedCounter.Count() > 0)
@@ -421,22 +421,23 @@ namespace UsageMonitor
                             CountersInfo = tempCounters;
                         }
                     }
+                    catch(InvalidOperationException)
+                    {
+                        API api = this.CounterOptions.FirstOrDefault().Value.FirstOrDefault().Value.API;
+
+                        if (api != null)
+                        {
+                            api.Log(API.LogType.Debug, "Could not find a category called " + category);
+                        }
+                        else
+                        {
+                            API.Log((int)API.LogType.Debug, "Could not find a category called " + category);
+                        }
+                        //Do not worry if using a translation since categories must be unique
+                    }
                     catch
                     {
-                        API.Log((int)API.LogType.Error, "Could not find a category called " + category);
-
-                        //If we are using a translation and this happens try it untranslated
-                        //foreach (Dictionary<String, MeasureOptions> options in this.CounterOptions.Values)
-                        //{
-                        //    foreach (MeasureOptions option in options.Values)
-                        //    {
-                        //        if (option.UntranslatedCategory.Count() > 0)
-                        //        {
-                        //            option.Category = option.UntranslatedCategory;
-                        //            option.UntranslatedCategory = "";
-                        //        }
-                        //    }
-                        //}
+                        API.Log((int)API.LogType.Error, "UsageMonitor crashed trying to update the counters");
                     }
                     finally
                     {
